@@ -7,7 +7,9 @@
     <string name="home_device_label">RAY-BAN</string>
     <string name="home_connected_to">Connected to %1$s</string>
     <string name="home_not_connected">Not connected</string>
-    <string name="home_device_description">Wearable connectivity will be added in a later phase.</string>
+    <string name="home_connecting">Connecting…</string>
+    <string name="home_connection_failed">Connection failed</string>
+    <string name="home_device_description">Choose the phone or glasses capture source in the camera screen.</string>
     <string name="home_assistant_label">AI ASSISTANT</string>
     <string name="home_assistant_ready">Foundation ready</string>
     <string name="home_assistant_description">AI vision and voice assistant are active. Ask about what you see.</string>

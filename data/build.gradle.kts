@@ -13,7 +13,6 @@ android {
 
 dependencies {
     implementation(project(":core:common"))
-    implementation(project(":core:network"))
     implementation(project(":domain"))
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.okhttp)

@@ -122,10 +122,13 @@ private fun ConnectionCard(connectionState: DeviceConnectionState) {
     }
     val statusText = when (connectionState) {
         DeviceConnectionState.Disconnected -> stringResource(R.string.home_not_connected)
+        DeviceConnectionState.Connecting -> stringResource(R.string.home_connecting)
         is DeviceConnectionState.Connected -> stringResource(
             R.string.home_connected_to,
             connectionState.deviceName,
         )
+        is DeviceConnectionState.Failed -> connectionState.reason
+            ?: stringResource(R.string.home_connection_failed)
     }
 
     GlassCard(modifier = Modifier.fillMaxWidth()) {

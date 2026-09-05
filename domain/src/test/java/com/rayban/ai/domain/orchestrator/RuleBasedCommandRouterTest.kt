@@ -177,6 +177,41 @@ class RuleBasedCommandRouterTest {
         assertRejected("", CommandError.EmptyInput)
     }
 
+    @Test
+    fun `vietnamese photo variants`() {
+        assertCommand("Chụp giúp tôi", AssistantCommand.TakePhoto)
+        assertCommand("Chụp dùm tôi một tấm", AssistantCommand.TakePhoto)
+        assertCommand("Chụp cho tôi đi", AssistantCommand.TakePhoto)
+        assertCommand("Take a snap", AssistantCommand.TakePhoto)
+        assertCommand("Snap a pic please", AssistantCommand.TakePhoto)
+    }
+
+    @Test
+    fun `vietnamese describe scene variants`() {
+        assertCommand("Mô tả phía trước", AssistantCommand.DescribeScene)
+        assertCommand("Phía trước có gì", AssistantCommand.DescribeScene)
+        assertCommand("Mô tả trước mặt giúp tôi", AssistantCommand.DescribeScene)
+        assertCommand("What's around me?", AssistantCommand.DescribeScene)
+        assertCommand("Describe in front of me", AssistantCommand.DescribeScene)
+    }
+
+    @Test
+    fun `vietnamese identify and read text variants`() {
+        assertCommand("Đó là cái gì", AssistantCommand.IdentifyObject)
+        assertCommand("Cái này là vật gì", AssistantCommand.IdentifyObject)
+        assertCommand("Nhận diện vật này", AssistantCommand.IdentifyObject)
+        assertCommand("Đọc biển báo", AssistantCommand.ReadText)
+        assertCommand("Biển báo này ghi gì", AssistantCommand.ReadText)
+        assertCommand("Đọc hộ chữ này", AssistantCommand.ReadText)
+    }
+
+    @Test
+    fun `video and summarize variants`() {
+        assertCommand("Quay hình đi", AssistantCommand.RecordVideo)
+        assertCommand("Quay giúp tôi một đoạn", AssistantCommand.RecordVideo)
+        assertCommand("Nói tóm tắt lại", AssistantCommand.SummarizeScene)
+    }
+
     private fun assertRejected(utterance: String, expected: CommandError) {
         val match = route(utterance)
         assertEquals("utterance: $utterance", CommandMatch.Rejected(expected), match)

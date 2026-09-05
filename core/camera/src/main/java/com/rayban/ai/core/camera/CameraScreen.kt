@@ -3,9 +3,11 @@ package com.rayban.ai.core.camera
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.view.PreviewView
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -30,6 +32,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -37,6 +40,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
@@ -50,6 +55,8 @@ import com.rayban.ai.core.voice.AssistantPhase
 import com.rayban.ai.core.voice.VoiceAssistantViewModel
 import com.rayban.ai.core.voice.VoiceError
 import com.rayban.ai.domain.model.ConversationTurn
+import com.rayban.ai.domain.wearable.DeviceSource
+import kotlinx.coroutines.flow.Flow
 
 @Composable
 fun CameraScreen(
@@ -65,6 +72,16 @@ fun CameraScreen(
     var question by rememberSaveable { mutableStateOf(defaultQuestion) }
     val voiceState by voiceViewModel.uiState.collectAsStateWithLifecycle()
     val previewController = previewViewModel.controller
+    val cameraSource by previewViewModel.cameraSource.collectAsStateWithLifecycle()
+    val micSource by previewViewModel.micSource.collectAsStateWithLifecycle()
+    val usePhoneCamera = cameraSource == DeviceSource.PHONE
+    val usePhoneMic = micSource == DeviceSource.PHONE
+    val busy = voiceState.phase != AssistantPhase.Idle
+    // The fake glasses demo does not use the phone camera or real hardware.
+    val assistantReady = !usePhoneCamera || hasPermission
+    val phonePreview = remember(context, lifecycleOwner, hasPermission, usePhoneCamera) {
+        if (hasPermission && usePhoneCamera) PreviewView(context) else null
+    }
 
     val permissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission(),
@@ -81,9 +98,11 @@ fun CameraScreen(
         }
     }
 
-    DisposableEffect(lifecycleOwner, hasPermission) {
+    // Screen-owned binding survives lazy item disposal and avoids rebinding during capture.
+    DisposableEffect(previewController, lifecycleOwner, phonePreview) {
+        phonePreview?.let { previewController.bind(it, lifecycleOwner) }
         onDispose {
-            if (hasPermission) {
+            if (phonePreview != null) {
                 previewController.unbind()
             }
         }
@@ -95,8 +114,8 @@ fun CameraScreen(
             .background(MaterialTheme.colorScheme.background)
             .statusBarsPadding()
             .navigationBarsPadding(),
-        contentPadding = PaddingValues(start = 20.dp, top = 12.dp, end = 20.dp, bottom = 28.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
+        contentPadding = PaddingValues(start = 16.dp, top = 4.dp, end = 16.dp, bottom = 24.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         item {
             Row(
@@ -112,30 +131,45 @@ fun CameraScreen(
                         text = stringResource(R.string.camera_title),
                         style = MaterialTheme.typography.titleLarge,
                     )
-                    Text(
-                        text = stringResource(R.string.camera_subtitle),
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
                 }
             }
         }
 
-        if (hasPermission) {
+        item {
+            DeviceSourceCard(
+                cameraSource = cameraSource,
+                micSource = micSource,
+                busy = busy,
+                onCameraSource = {
+                    if (voiceViewModel.uiState.value.phase == AssistantPhase.Idle) {
+                        previewViewModel.selectCameraSource(it)
+                    }
+                },
+                onMicSource = {
+                    if (voiceViewModel.uiState.value.phase == AssistantPhase.Idle) {
+                        previewViewModel.selectMicSource(it)
+                    }
+                },
+            )
+        }
+        if (assistantReady) {
             item {
-                CameraPreview(
-                    controller = previewController,
-                    lifecycleOwner = lifecycleOwner,
-                )
+                if (phonePreview != null) {
+                    CameraPreview(previewView = phonePreview)
+                } else {
+                    GlassesPreview(frames = previewViewModel.glassesFrames)
+                }
             }
             item {
                 AssistantInputCard(
                     question = question,
                     onQuestionChange = { question = it },
-                    busy = voiceState.phase != AssistantPhase.Idle,
+                    busy = busy,
+                    phase = voiceState.phase,
                     onAnalyze = { voiceViewModel.askText(question) },
                     onMicClick = {
-                        if (hasMicPermission) {
+                        // Glasses microphone remains explicitly unsupported.
+                        if (!usePhoneMic || hasMicPermission) {
                             voiceViewModel.onMicClick()
                         } else {
                             micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
@@ -150,11 +184,24 @@ fun CameraScreen(
                 AssistantPhase.Listening -> {
                     item { StatusText(stringResource(R.string.camera_voice_listening)) }
                 }
+                AssistantPhase.Transcribing -> {
+                    item { StatusText(stringResource(R.string.camera_voice_transcribing)) }
+                }
                 AssistantPhase.Processing -> {
                     item { StatusText(stringResource(R.string.camera_voice_processing)) }
                 }
                 AssistantPhase.Speaking -> {
-                    item { StatusText(stringResource(R.string.camera_voice_speaking)) }
+                    item {
+                        StatusText(
+                            stringResource(
+                                if (voiceState.isSynthesizing) {
+                                    R.string.camera_voice_synthesizing
+                                } else {
+                                    R.string.camera_voice_speaking
+                                },
+                            ),
+                        )
+                    }
                 }
                 AssistantPhase.Recording -> {
                     item { StatusText(stringResource(R.string.camera_status_recording)) }
@@ -211,6 +258,7 @@ private fun AssistantInputCard(
     question: String,
     onQuestionChange: (String) -> Unit,
     busy: Boolean,
+    phase: AssistantPhase,
     onAnalyze: () -> Unit,
     onMicClick: () -> Unit,
     onNewConversation: () -> Unit,
@@ -218,7 +266,23 @@ private fun AssistantInputCard(
     onQuickCommand: (String) -> Unit,
 ) {
     GlassCard(modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(20.dp)) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Button(onClick = onMicClick, modifier = Modifier.fillMaxWidth()) {
+                Text(stringResource(when (phase) {
+                    AssistantPhase.Idle -> R.string.camera_mic
+                    AssistantPhase.Listening -> R.string.camera_mic_submit
+                    AssistantPhase.Transcribing, AssistantPhase.Processing -> R.string.camera_mic_cancel
+                    AssistantPhase.Speaking -> R.string.camera_mic_stop_speaking
+                    AssistantPhase.Recording -> R.string.camera_mic_stop_video
+                }))
+            }
+            Text(stringResource(R.string.camera_auto_language), style = MaterialTheme.typography.labelMedium)
+            Text(stringResource(R.string.camera_audio_privacy), style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (phase == AssistantPhase.Transcribing) {
+                StatusText(stringResource(R.string.camera_voice_transcribing))
+            }
+            Spacer(modifier = Modifier.height(8.dp))
             OutlinedTextField(
                 value = question,
                 onValueChange = onQuestionChange,
@@ -235,9 +299,6 @@ private fun AssistantInputCard(
                     modifier = Modifier.weight(1f),
                 ) {
                     Text(stringResource(analyzeButtonText(busy)))
-                }
-                Button(onClick = onMicClick) {
-                    Text(stringResource(R.string.camera_mic))
                 }
             }
             Spacer(modifier = Modifier.height(8.dp))
@@ -357,10 +418,19 @@ private fun VoiceErrorCard(
         VoiceError.RecognizerUnavailable -> stringResource(R.string.camera_voice_error_recognizer)
         VoiceError.NoMatch -> stringResource(R.string.camera_voice_error_no_match)
         VoiceError.SpeechNetwork -> stringResource(R.string.camera_voice_error_speech_network)
+        VoiceError.VoiceLanguageUnavailable -> stringResource(R.string.camera_voice_language_unavailable)
+        VoiceError.VoiceSynthesisFailed -> stringResource(R.string.camera_voice_error_synthesis)
+        VoiceError.SpeechMissingApiKey -> stringResource(R.string.camera_voice_error_missing_key)
+        VoiceError.SpeechAccessDenied -> stringResource(R.string.camera_voice_error_access)
+        VoiceError.SpeechModelUnavailable -> stringResource(R.string.camera_voice_error_model)
+        VoiceError.SpeechInvalidRequest -> stringResource(R.string.camera_voice_error_request)
+        VoiceError.SpeechRateLimited -> stringResource(R.string.camera_voice_error_speech_quota)
+        VoiceError.SpeechTimeout -> stringResource(R.string.camera_voice_error_speech_timeout)
         VoiceError.SpeechAudio -> stringResource(R.string.camera_voice_error_speech_audio)
         VoiceError.Network -> stringResource(R.string.camera_vision_error_network)
         VoiceError.Timeout -> stringResource(R.string.camera_vision_error_timeout)
         VoiceError.InvalidImage -> stringResource(R.string.camera_vision_error_invalid_image)
+        VoiceError.SourceDisconnected -> stringResource(R.string.camera_error_source_disconnected)
         VoiceError.ProviderUnavailable -> stringResource(R.string.camera_vision_error_provider)
         VoiceError.RateLimited -> stringResource(R.string.camera_vision_error_rate_limited)
         VoiceError.Cancelled -> stringResource(R.string.camera_vision_error_cancelled)
@@ -379,32 +449,123 @@ private fun VoiceErrorCard(
                 color = MaterialTheme.colorScheme.error,
             )
             Spacer(modifier = Modifier.height(12.dp))
-            Button(onClick = onRetry) {
-                Text(stringResource(R.string.camera_voice_retry))
+            if (error != VoiceError.VoiceLanguageUnavailable) {
+                Button(onClick = onRetry) {
+                    Text(stringResource(R.string.camera_voice_retry))
+                }
             }
         }
     }
 }
 
 @Composable
+private fun DeviceSourceCard(
+    cameraSource: DeviceSource,
+    micSource: DeviceSource,
+    busy: Boolean,
+    onCameraSource: (DeviceSource) -> Unit,
+    onMicSource: (DeviceSource) -> Unit,
+) {
+    GlassCard(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)) {
+            SourceSelectorRow(
+                label = stringResource(R.string.camera_source_camera),
+                selected = cameraSource,
+                enabled = !busy,
+                onSelect = onCameraSource,
+            )
+            SourceSelectorRow(
+                label = stringResource(R.string.camera_source_mic),
+                selected = micSource,
+                enabled = !busy,
+                onSelect = onMicSource,
+            )
+            if (cameraSource == DeviceSource.GLASSES || micSource == DeviceSource.GLASSES) {
+                Text(
+                    text = stringResource(R.string.camera_source_demo_hint),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun SourceSelectorRow(
+    label: String,
+    selected: DeviceSource,
+    enabled: Boolean,
+    onSelect: (DeviceSource) -> Unit,
+) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.bodyMedium,
+            modifier = Modifier.weight(1f),
+        )
+        if (selected == DeviceSource.PHONE) {
+            Button(onClick = { onSelect(DeviceSource.PHONE) }, enabled = enabled) {
+                Text(stringResource(R.string.camera_source_phone))
+            }
+        } else {
+            TextButton(onClick = { onSelect(DeviceSource.PHONE) }, enabled = enabled) {
+                Text(stringResource(R.string.camera_source_phone))
+            }
+        }
+        if (selected == DeviceSource.GLASSES) {
+            Button(onClick = { onSelect(DeviceSource.GLASSES) }, enabled = enabled) {
+                Text(stringResource(R.string.camera_source_glasses))
+            }
+        } else {
+            TextButton(onClick = { onSelect(DeviceSource.GLASSES) }, enabled = enabled) {
+                Text(stringResource(R.string.camera_source_glasses))
+            }
+        }
+    }
+}
+
+@Composable
+private fun GlassesPreview(frames: Flow<Bitmap?>) {
+    // Compose's render thread may retain old bitmaps; leave their lifetime to GC.
+    val bitmap by frames.collectAsStateWithLifecycle(initialValue = null)
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(160.dp)
+            .clip(MaterialTheme.shapes.large),
+        contentAlignment = Alignment.Center,
+    ) {
+        val currentBitmap = bitmap
+        if (currentBitmap != null) {
+            Image(
+                bitmap = currentBitmap.asImageBitmap(),
+                contentDescription = stringResource(R.string.camera_glasses_preview_description),
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Crop,
+            )
+        } else {
+            StatusText(stringResource(R.string.camera_glasses_waiting_frame))
+        }
+    }
+}
+
+@Composable
 private fun CameraPreview(
-    controller: CameraPreviewController,
-    lifecycleOwner: androidx.lifecycle.LifecycleOwner,
+    previewView: PreviewView,
 ) {
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .height(380.dp)
+            .height(160.dp)
             .clip(MaterialTheme.shapes.large),
     ) {
-        AndroidView(
-            modifier = Modifier.fillMaxSize(),
-            factory = { viewContext ->
-                PreviewView(viewContext).also { previewView ->
-                    controller.bind(previewView, lifecycleOwner)
-                }
-            },
-        )
+        key(previewView) {
+            AndroidView(
+                modifier = Modifier.fillMaxSize(),
+                factory = { previewView },
+            )
+        }
     }
 }
 

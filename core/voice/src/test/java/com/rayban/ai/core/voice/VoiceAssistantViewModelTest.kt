@@ -12,6 +12,8 @@ import com.rayban.ai.domain.model.AssistantRequest
 import com.rayban.ai.domain.model.AssistantResponse
 import com.rayban.ai.domain.model.CameraCapabilities
 import com.rayban.ai.domain.model.ConversationTurn
+import com.rayban.ai.domain.model.FrameCaptureError
+import com.rayban.ai.domain.model.FrameCaptureException
 import com.rayban.ai.domain.model.ImageFormat
 import com.rayban.ai.domain.model.ImageFrame
 import com.rayban.ai.domain.model.MediaAsset
@@ -114,6 +116,28 @@ class VoiceAssistantViewModelTest {
     }
 
     @Test
+    fun `synthesizing and started track cloud tts progress`() = runTest {
+        val speech = FakeSpeechToText()
+        val speaker = FakeTextSpeaker()
+        val viewModel = buildViewModel(speechToText = speech, textSpeaker = speaker)
+
+        viewModel.onMicClick()
+        speech.emit(SpeechEvent.FinalResult("What is this?"))
+        assertEquals(AssistantPhase.Speaking, viewModel.uiState.value.phase)
+        assertEquals(false, viewModel.uiState.value.isSynthesizing)
+
+        speaker.emit(SpeakerEvent.Synthesizing)
+        assertEquals(AssistantPhase.Speaking, viewModel.uiState.value.phase)
+        assertEquals(true, viewModel.uiState.value.isSynthesizing)
+
+        speaker.emit(SpeakerEvent.Started)
+        assertEquals(false, viewModel.uiState.value.isSynthesizing)
+
+        speaker.emit(SpeakerEvent.Finished)
+        assertEquals(AssistantPhase.Idle, viewModel.uiState.value.phase)
+    }
+
+    @Test
     fun `tts error keeps the text answer`() = runTest {
         val speech = FakeSpeechToText()
         val speaker = FakeTextSpeaker()
@@ -142,18 +166,54 @@ class VoiceAssistantViewModelTest {
     }
 
     @Test
-    fun `speech no match error surfaces in state`() = runTest {
+    fun `speech errors return to idle and allow listening again`() = runTest {
+        val speech = FakeSpeechToText()
+        val viewModel = buildViewModel(speechToText = speech)
+
+        val errors = listOf(
+            SpeechError.NoMatch to VoiceError.NoMatch,
+            SpeechError.NotAvailable to VoiceError.RecognizerUnavailable,
+            SpeechError.MissingApiKey to VoiceError.SpeechMissingApiKey,
+            SpeechError.AccessDenied to VoiceError.SpeechAccessDenied,
+            SpeechError.ModelUnavailable to VoiceError.SpeechModelUnavailable,
+            SpeechError.InvalidRequest to VoiceError.SpeechInvalidRequest,
+            SpeechError.Busy to VoiceError.RecognizerUnavailable,
+            SpeechError.PermissionDenied to VoiceError.MicPermissionDenied,
+            SpeechError.Network to VoiceError.SpeechNetwork,
+            SpeechError.RateLimited to VoiceError.SpeechRateLimited,
+            SpeechError.Timeout to VoiceError.SpeechTimeout,
+            SpeechError.Audio to VoiceError.SpeechAudio,
+            SpeechError.Unknown to VoiceError.Unknown,
+        )
+        errors.forEach { (speechError, voiceError) ->
+            viewModel.onMicClick()
+            assertEquals(AssistantPhase.Listening, viewModel.uiState.value.phase)
+            assertNull(viewModel.uiState.value.error)
+            speech.emit(SpeechEvent.Error(speechError))
+            assertEquals(AssistantPhase.Idle, viewModel.uiState.value.phase)
+            assertEquals(voiceError, viewModel.uiState.value.error)
+        }
+        assertEquals(errors.size, speech.startCount)
+        viewModel.onMicClick()
+        assertEquals(AssistantPhase.Listening, viewModel.uiState.value.phase)
+    }
+
+    @Test
+    fun `retry after unavailable recognizer starts listening again`() = runTest {
         val speech = FakeSpeechToText()
         val viewModel = buildViewModel(speechToText = speech)
 
         viewModel.onMicClick()
-        speech.emit(SpeechEvent.Error(SpeechError.NoMatch))
+        speech.emit(SpeechEvent.Error(SpeechError.NotAvailable))
+        viewModel.retry()
 
-        assertEquals(VoiceError.NoMatch, viewModel.uiState.value.error)
+        assertEquals(AssistantPhase.Listening, viewModel.uiState.value.phase)
+        assertNull(viewModel.uiState.value.error)
+        assertEquals(2, speech.startCount)
     }
 
     @Test
-    fun `mic click while listening cancels and returns to idle`() = runTest {
+    fun `mic click finishes capture then next click cancels transcription`() = runTest {
         val speech = FakeSpeechToText()
         val viewModel = buildViewModel(speechToText = speech)
 
@@ -161,6 +221,10 @@ class VoiceAssistantViewModelTest {
         assertEquals(AssistantPhase.Listening, viewModel.uiState.value.phase)
         viewModel.onMicClick()
 
+        assertEquals(AssistantPhase.Transcribing, viewModel.uiState.value.phase)
+        assertEquals(1, speech.stopCount)
+        assertEquals(0, speech.cancelCount)
+        viewModel.onMicClick()
         assertEquals(AssistantPhase.Idle, viewModel.uiState.value.phase)
         assertEquals(1, speech.cancelCount)
     }
@@ -282,6 +346,9 @@ class VoiceAssistantViewModelTest {
 
         viewModel.onMicClick()
         viewModel.onMicClick()
+        viewModel.onMicClick()
+        speech.emit(SpeechEvent.Ready)
+        speech.emit(SpeechEvent.Listening)
         speech.emit(SpeechEvent.FinalResult("What is this?"))
 
         assertEquals(AssistantPhase.Idle, viewModel.uiState.value.phase)
@@ -319,7 +386,7 @@ class VoiceAssistantViewModelTest {
 
         viewModel.askText("Take a photo")
 
-        assertEquals(AssistantPhase.Idle, viewModel.uiState.value.phase)
+        assertEquals(AssistantPhase.Speaking, viewModel.uiState.value.phase)
         assertEquals(1, camera.photoCount)
         assertEquals(0, engine.calls)
         assertNull(viewModel.uiState.value.error)
@@ -333,11 +400,16 @@ class VoiceAssistantViewModelTest {
 
         viewModel.askText("Take a photo")
 
-        assertEquals(AssistantPhase.Idle, viewModel.uiState.value.phase)
+        assertEquals(AssistantPhase.Speaking, viewModel.uiState.value.phase)
         assertNotNull(viewModel.uiState.value.mediaMessage)
         assertEquals(MediaType.Photo, viewModel.uiState.value.mediaMessage?.type)
-        assertEquals(listOf(VoiceAssistantViewModel.PHOTO_SAVED_CONFIRMATION), speaker.spokenTexts)
+        assertEquals(listOf("Photo taken and saved."), speaker.spokenTexts)
         assertNull(viewModel.uiState.value.error)
+
+        speaker.emit(SpeakerEvent.Finished)
+
+        assertEquals(AssistantPhase.Idle, viewModel.uiState.value.phase)
+        assertEquals(MediaType.Photo, viewModel.uiState.value.mediaMessage?.type)
     }
 
     @Test
@@ -353,9 +425,54 @@ class VoiceAssistantViewModelTest {
         viewModel.onMicClick()
 
         assertEquals(1, camera.stopCount)
+        assertEquals(AssistantPhase.Speaking, viewModel.uiState.value.phase)
+        assertNull(viewModel.uiState.value.recordingStartedAtMillis)
+        assertEquals(MediaType.Video, viewModel.uiState.value.mediaMessage?.type)
+        assertEquals(listOf("Video recorded and saved."), speaker.spokenTexts)
+
+        speaker.emit(SpeakerEvent.Finished)
+
         assertEquals(AssistantPhase.Idle, viewModel.uiState.value.phase)
         assertEquals(MediaType.Video, viewModel.uiState.value.mediaMessage?.type)
-        assertEquals(listOf(VoiceAssistantViewModel.VIDEO_SAVED_CONFIRMATION), speaker.spokenTexts)
+    }
+
+    @Test
+    fun `mic during photo confirmation stops speech instead of listening`() = runTest {
+        val speech = FakeSpeechToText()
+        val speaker = FakeTextSpeaker()
+        val viewModel = buildViewModel(speechToText = speech, textSpeaker = speaker)
+
+        viewModel.askText("Take a photo")
+        viewModel.onMicClick()
+
+        assertEquals(AssistantPhase.Idle, viewModel.uiState.value.phase)
+        assertEquals(1, speaker.stopCount)
+        assertEquals(0, speech.startCount)
+        assertEquals(MediaType.Photo, viewModel.uiState.value.mediaMessage?.type)
+    }
+
+    @Test
+    fun `confirmation tts error returns to idle and preserves saved media`() = runTest {
+        val speaker = FakeTextSpeaker()
+        val viewModel = buildViewModel(textSpeaker = speaker)
+
+        viewModel.askText("Take a photo")
+        speaker.emit(SpeakerEvent.Error("language unavailable"))
+
+        assertEquals(AssistantPhase.Idle, viewModel.uiState.value.phase)
+        assertEquals(MediaType.Photo, viewModel.uiState.value.mediaMessage?.type)
+        assertNull(viewModel.uiState.value.error)
+    }
+
+    @Test
+    fun `missing voice shows actionable error and preserves photo`() = runTest {
+        val speaker = FakeTextSpeaker()
+        val viewModel = buildViewModel(textSpeaker = speaker)
+        viewModel.askText("Chụp ảnh")
+        speaker.emit(SpeakerEvent.LanguageUnavailable)
+        assertEquals(AssistantPhase.Idle, viewModel.uiState.value.phase)
+        assertEquals(MediaType.Photo, viewModel.uiState.value.mediaMessage?.type)
+        assertEquals(VoiceError.VoiceLanguageUnavailable, viewModel.uiState.value.error)
     }
 
     @Test
@@ -422,6 +539,96 @@ class VoiceAssistantViewModelTest {
         viewModel.askText("Send a message to mom")
 
         assertEquals(VoiceError.UnsupportedAction, viewModel.uiState.value.error)
+    }
+
+    @Test
+    fun `vietnamese spoken photo command saves with vietnamese confirmation`() = runTest {
+        val speech = FakeSpeechToText()
+        val speaker = FakeTextSpeaker()
+        val engine = RecordingAssistantEngine()
+        val camera = FakeWearableCamera()
+        val viewModel = buildViewModel(
+            speechToText = speech,
+            textSpeaker = speaker,
+            assistantEngine = engine,
+            camera = camera,
+        )
+
+        viewModel.onMicClick()
+        speech.emit(SpeechEvent.FinalResult("Chụp ảnh giúp tôi"))
+        speech.emit(SpeechEvent.FinalResult("Chụp ảnh giúp tôi"))
+
+        assertEquals(AssistantPhase.Speaking, viewModel.uiState.value.phase)
+        assertEquals(1, camera.photoCount)
+        assertEquals(0, engine.calls)
+        assertEquals("Đã chụp và lưu ảnh.", VoiceAssistantViewModel.PHOTO_SAVED_CONFIRMATION)
+        assertEquals(listOf(VoiceAssistantViewModel.PHOTO_SAVED_CONFIRMATION), speaker.spokenTexts)
+        assertNull(viewModel.uiState.value.error)
+    }
+
+    @Test
+    fun `video confirmation is vietnamese`() {
+        assertEquals("Đã quay và lưu video.", VoiceAssistantViewModel.VIDEO_SAVED_CONFIRMATION)
+    }
+
+    @Test
+    fun `media confirmations follow current command language including unaccented Vietnamese`() {
+        for (command in listOf("Chụp ảnh", "chup anh", "Chụp ảnh please")) {
+            assertEquals("Đã chụp và lưu ảnh.", VoiceAssistantViewModel.mediaConfirmation(command, false))
+        }
+        assertEquals("Photo taken and saved.", VoiceAssistantViewModel.mediaConfirmation("Take a photo", false))
+        assertEquals("Đã quay và lưu video.", VoiceAssistantViewModel.mediaConfirmation("Quay video", true))
+        assertEquals("Video recorded and saved.", VoiceAssistantViewModel.mediaConfirmation("Record a video", true))
+    }
+
+    @Test
+    fun `hardware command executes like a voice command`() = runTest {
+        val engine = RecordingAssistantEngine()
+        val camera = FakeWearableCamera()
+        val viewModel = buildViewModel(assistantEngine = engine, camera = camera)
+
+        viewModel.onHardwareCommand("Take a photo")
+
+        assertEquals(AssistantPhase.Speaking, viewModel.uiState.value.phase)
+        assertEquals(1, camera.photoCount)
+        assertEquals(0, engine.calls)
+        assertNull(viewModel.uiState.value.error)
+    }
+
+    @Test
+    fun `hardware describe command analyzes a frame`() = runTest {
+        val source = CountingSource(sampleFrame())
+        val engine = RecordingAssistantEngine()
+        val viewModel = buildViewModel(imageSource = source, assistantEngine = engine)
+
+        viewModel.onHardwareCommand("Mô tả phía trước")
+
+        assertEquals(1, source.captureCount)
+        assertEquals(1, engine.calls)
+        assertEquals(1, viewModel.uiState.value.turns.size)
+    }
+
+    @Test
+    fun `source disconnected maps to source disconnected error`() = runTest {
+        val viewModel = buildViewModel(
+            imageSource = FailingSource(FrameCaptureError.SourceDisconnected),
+        )
+
+        viewModel.askText("What is this?")
+
+        assertEquals(AssistantPhase.Idle, viewModel.uiState.value.phase)
+        assertEquals(VoiceError.SourceDisconnected, viewModel.uiState.value.error)
+    }
+
+    @Test
+    fun `capture failure still maps to invalid image`() = runTest {
+        val viewModel = buildViewModel(
+            imageSource = FailingSource(FrameCaptureError.CaptureFailed),
+        )
+
+        viewModel.askText("What is this?")
+
+        assertEquals(VoiceError.InvalidImage, viewModel.uiState.value.error)
     }
 
     // ------------------------------------------------------------------
@@ -537,6 +744,12 @@ class VoiceAssistantViewModelTest {
         override suspend fun captureFrame(): ImageFrame {
             kotlinx.coroutines.delay(Long.MAX_VALUE)
             error("unreachable")
+        }
+    }
+
+    private class FailingSource(private val error: FrameCaptureError) : ImageSource {
+        override suspend fun captureFrame(): ImageFrame {
+            throw FrameCaptureException(error, "capture boom")
         }
     }
 

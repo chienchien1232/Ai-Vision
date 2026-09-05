@@ -21,6 +21,14 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         buildConfigField("String", "GEMINI_API_KEY", "\"${geminiApiKey()}\"")
+        val sttModel = providers.gradleProperty("GEMINI_STT_MODEL").getOrElse("gemini-3.6-flash")
+        require(sttModel.matches(Regex("[a-zA-Z0-9.-]+")))
+        buildConfigField("String", "GEMINI_STT_MODEL", "\"$sttModel\"")
+        val ttsModel = providers.gradleProperty("GEMINI_TTS_MODEL").getOrElse("gemini-3.1-flash-tts-preview")
+        val ttsVoice = providers.gradleProperty("GEMINI_TTS_VOICE").getOrElse("Kore")
+        require(ttsModel.matches(Regex("[a-zA-Z0-9.-]+")) && ttsVoice.matches(Regex("[a-zA-Z]+")))
+        buildConfigField("String", "GEMINI_TTS_MODEL", "\"$ttsModel\"")
+        buildConfigField("String", "GEMINI_TTS_VOICE", "\"$ttsVoice\"")
     }
 
     buildTypes {
@@ -53,7 +61,6 @@ dependencies {
     implementation(project(":core:camera"))
     implementation(project(":core:audio"))
     implementation(project(":core:voice"))
-    implementation(project(":core:network"))
     implementation(project(":data"))
     implementation(project(":domain"))
     implementation(project(":feature"))

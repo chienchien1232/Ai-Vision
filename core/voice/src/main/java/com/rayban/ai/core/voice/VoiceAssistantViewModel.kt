@@ -9,6 +9,7 @@ import com.rayban.ai.domain.audio.SpeechEvent
 import com.rayban.ai.domain.audio.SpeechToText
 import com.rayban.ai.domain.audio.TextSpeaker
 import com.rayban.ai.domain.model.FrameCaptureException
+import com.rayban.ai.domain.model.FrameCaptureError
 import com.rayban.ai.domain.model.MediaCaptureException
 import com.rayban.ai.domain.model.MediaCaptureError
 import com.rayban.ai.domain.model.VisionException
@@ -41,6 +42,12 @@ class VoiceAssistantViewModel @Inject constructor(
     private var commandJob: Job? = null
     private var interactionId: Long = 0L
     private var lastQuestion: String? = null
+    private var lastSpokenText: String? = null
+
+    private fun speakReply(text: String) {
+        lastSpokenText = text
+        textSpeaker.speak(text)
+    }
     private var lastCommand: AssistantCommand? = null
 
     init {
@@ -61,7 +68,11 @@ class VoiceAssistantViewModel @Inject constructor(
     fun onMicClick() {
         when (_uiState.value.phase) {
             AssistantPhase.Idle -> startListening()
-            AssistantPhase.Listening -> cancelListening()
+            AssistantPhase.Listening -> {
+                _uiState.value = _uiState.value.copy(phase = AssistantPhase.Transcribing)
+                speechToText.stopListening()
+            }
+            AssistantPhase.Transcribing -> cancelListening()
             AssistantPhase.Processing -> cancelCommand()
             AssistantPhase.Speaking -> stopSpeaking()
             AssistantPhase.Recording -> stopRecordingEarly()
@@ -76,7 +87,22 @@ class VoiceAssistantViewModel @Inject constructor(
         submit(utterance, CommandSource.QuickAction)
     }
 
+    /**
+     * Entry point for glasses hardware triggers (e.g. ESP32 button press mapped
+     * to a spoken-equivalent utterance). Goes through the same router as voice.
+     */
+    fun onHardwareCommand(utterance: String) {
+        submit(utterance.trim(), CommandSource.Hardware)
+    }
+
     fun retry() {
+        if (_uiState.value.error == VoiceError.VoiceSynthesisFailed) {
+            lastSpokenText?.let {
+                _uiState.value = _uiState.value.copy(phase = AssistantPhase.Speaking, error = null, errorMessage = null)
+                speakReply(it)
+            }
+            return
+        }
         val currentError = _uiState.value.error
         if (currentError != null && currentError.isSpeechError()) {
             startListening()
@@ -159,7 +185,7 @@ class VoiceAssistantViewModel @Inject constructor(
             errorMessage = null,
             recordingStartedAtMillis = if (isVideo) System.currentTimeMillis() else null,
         )
-        Log.d(TAG, "[Voice] Executing command: $command utterance: $utterance")
+        Log.d(TAG, "[Voice] Executing command")
         commandJob?.cancel()
         commandJob = viewModelScope.launch {
             try {
@@ -170,24 +196,24 @@ class VoiceAssistantViewModel @Inject constructor(
                             phase = AssistantPhase.Speaking,
                             turns = outcome.turns,
                         )
-                        textSpeaker.speak(outcome.text)
+                        speakReply(outcome.text)
                     }
                     is CommandOutcome.PhotoSaved -> {
                         Log.d(TAG, "[Voice] Photo saved: ${outcome.asset.uri}")
                         _uiState.value = _uiState.value.copy(
-                            phase = AssistantPhase.Idle,
+                            phase = AssistantPhase.Speaking,
                             mediaMessage = MediaMessage(outcome.asset.type, outcome.asset.uri),
                         )
-                        textSpeaker.speak(PHOTO_SAVED_CONFIRMATION)
+                        speakReply(mediaConfirmation(utterance, video = false))
                     }
                     is CommandOutcome.VideoSaved -> {
                         Log.d(TAG, "[Voice] Video saved: ${outcome.asset.uri}")
                         _uiState.value = _uiState.value.copy(
-                            phase = AssistantPhase.Idle,
+                            phase = AssistantPhase.Speaking,
                             mediaMessage = MediaMessage(outcome.asset.type, outcome.asset.uri),
                             recordingStartedAtMillis = null,
                         )
-                        textSpeaker.speak(VIDEO_SAVED_CONFIRMATION)
+                        speakReply(mediaConfirmation(utterance, video = true))
                     }
                     CommandOutcome.Stopped, CommandOutcome.NothingRunning, CommandOutcome.NoPreviousAnswer -> Unit
                 }
@@ -207,7 +233,7 @@ class VoiceAssistantViewModel @Inject constructor(
         Log.d(TAG, "[Voice] Stop command received in ${_uiState.value.phase}")
         when (_uiState.value.phase) {
             AssistantPhase.Idle -> Unit
-            AssistantPhase.Listening -> {
+            AssistantPhase.Listening, AssistantPhase.Transcribing -> {
                 speechToText.cancel()
                 _uiState.value = _uiState.value.copy(phase = AssistantPhase.Idle)
             }
@@ -230,7 +256,7 @@ class VoiceAssistantViewModel @Inject constructor(
             } else {
                 Log.d(TAG, "[Voice] Repeating last answer")
                 _uiState.value = _uiState.value.copy(phase = AssistantPhase.Speaking)
-                textSpeaker.speak(last)
+                speakReply(last)
             }
         }
     }
@@ -289,14 +315,15 @@ class VoiceAssistantViewModel @Inject constructor(
 
     private fun handleSpeechEvent(event: SpeechEvent) {
         when (event) {
-            is SpeechEvent.Ready, is SpeechEvent.Listening -> {
-                if (_uiState.value.phase == AssistantPhase.Idle) {
-                    _uiState.value = _uiState.value.copy(phase = AssistantPhase.Listening)
+            is SpeechEvent.Ready, is SpeechEvent.Listening -> Unit
+            SpeechEvent.Transcribing -> {
+                if (_uiState.value.phase == AssistantPhase.Listening) {
+                    _uiState.value = _uiState.value.copy(phase = AssistantPhase.Transcribing)
                 }
             }
             is SpeechEvent.PartialResult -> Unit
             is SpeechEvent.FinalResult -> {
-                if (_uiState.value.phase == AssistantPhase.Listening) {
+                if (_uiState.value.phase == AssistantPhase.Listening || _uiState.value.phase == AssistantPhase.Transcribing) {
                     if (event.text.isBlank()) {
                         Log.w(TAG, "[Voice] Empty final result")
                         _uiState.value = _uiState.value.copy(phase = AssistantPhase.Idle)
@@ -310,13 +337,13 @@ class VoiceAssistantViewModel @Inject constructor(
                 }
             }
             is SpeechEvent.Error -> {
-                if (_uiState.value.phase == AssistantPhase.Listening) {
+                if (_uiState.value.phase == AssistantPhase.Listening || _uiState.value.phase == AssistantPhase.Transcribing) {
                     Log.w(TAG, "[Voice] Speech error: ${event.error}")
-                    setError(event.error.toVoiceError(), null)
+                    setFailure(event.error.toVoiceError(), null)
                 }
             }
             is SpeechEvent.Cancelled -> {
-                if (_uiState.value.phase == AssistantPhase.Listening) {
+                if (_uiState.value.phase == AssistantPhase.Listening || _uiState.value.phase == AssistantPhase.Transcribing) {
                     _uiState.value = _uiState.value.copy(phase = AssistantPhase.Idle)
                 }
             }
@@ -326,7 +353,38 @@ class VoiceAssistantViewModel @Inject constructor(
     private fun handleSpeakerEvent(event: SpeakerEvent) {
         when (event) {
             is SpeakerEvent.Ready -> Unit
-            is SpeakerEvent.Started -> Unit
+            SpeakerEvent.Synthesizing -> {
+                if (_uiState.value.phase == AssistantPhase.Speaking) {
+                    _uiState.value = _uiState.value.copy(isSynthesizing = true)
+                }
+            }
+            is SpeakerEvent.SynthesisFailed -> {
+                if (_uiState.value.phase == AssistantPhase.Speaking) {
+                    val message = when (event.error) {
+                        SpeechError.MissingApiKey -> "Chưa cấu hình key Gemini cho giọng đọc."
+                        SpeechError.AccessDenied -> "Gemini từ chối quyền tạo giọng đọc."
+                        SpeechError.ModelUnavailable -> "Model giọng đọc không khả dụng."
+                        SpeechError.InvalidRequest -> "Gemini từ chối yêu cầu tạo giọng đọc."
+                        SpeechError.RateLimited -> "Đã hết quota hoặc vượt giới hạn tạo giọng đọc."
+                        SpeechError.Timeout -> "Tạo giọng đọc quá thời gian chờ."
+                        SpeechError.Network -> "Không thể kết nối Gemini để tạo giọng đọc."
+                        else -> "Không thể phát giọng đọc."
+                    }
+                    _uiState.value = _uiState.value.copy(phase = AssistantPhase.Idle, isSynthesizing = false,
+                        error = VoiceError.VoiceSynthesisFailed, errorMessage = message)
+                }
+            }
+            SpeakerEvent.LanguageUnavailable -> {
+                if (_uiState.value.phase == AssistantPhase.Speaking) {
+                    _uiState.value = _uiState.value.copy(
+                        phase = AssistantPhase.Idle,
+                        error = VoiceError.VoiceLanguageUnavailable,
+                    )
+                }
+            }
+            is SpeakerEvent.Started -> {
+                if (_uiState.value.phase == AssistantPhase.Speaking) _uiState.value = _uiState.value.copy(isSynthesizing = false)
+            }
             is SpeakerEvent.Finished -> {
                 if (_uiState.value.phase == AssistantPhase.Speaking) {
                     _uiState.value = _uiState.value.copy(phase = AssistantPhase.Idle)
@@ -369,8 +427,14 @@ class VoiceAssistantViewModel @Inject constructor(
     private fun SpeechError.toVoiceError(): VoiceError = when (this) {
         SpeechError.PermissionDenied -> VoiceError.MicPermissionDenied
         SpeechError.NotAvailable, SpeechError.Busy -> VoiceError.RecognizerUnavailable
+        SpeechError.MissingApiKey -> VoiceError.SpeechMissingApiKey
+        SpeechError.AccessDenied -> VoiceError.SpeechAccessDenied
+        SpeechError.ModelUnavailable -> VoiceError.SpeechModelUnavailable
+        SpeechError.InvalidRequest -> VoiceError.SpeechInvalidRequest
         SpeechError.NoMatch -> VoiceError.NoMatch
         SpeechError.Network -> VoiceError.SpeechNetwork
+        SpeechError.RateLimited -> VoiceError.SpeechRateLimited
+        SpeechError.Timeout -> VoiceError.SpeechTimeout
         SpeechError.Audio -> VoiceError.SpeechAudio
         SpeechError.Unknown -> VoiceError.Unknown
     }
@@ -378,8 +442,14 @@ class VoiceAssistantViewModel @Inject constructor(
     private fun VoiceError.isSpeechError(): Boolean = when (this) {
         VoiceError.MicPermissionDenied,
         VoiceError.RecognizerUnavailable,
+        VoiceError.SpeechMissingApiKey,
+        VoiceError.SpeechAccessDenied,
+        VoiceError.SpeechModelUnavailable,
+        VoiceError.SpeechInvalidRequest,
         VoiceError.NoMatch,
         VoiceError.SpeechNetwork,
+        VoiceError.SpeechRateLimited,
+        VoiceError.SpeechTimeout,
         VoiceError.SpeechAudio,
         -> true
         else -> false
@@ -395,7 +465,10 @@ class VoiceAssistantViewModel @Inject constructor(
             com.rayban.ai.domain.model.VisionError.Cancelled -> VoiceError.Cancelled
             com.rayban.ai.domain.model.VisionError.Unknown -> VoiceError.Unknown
         }
-        is FrameCaptureException -> VoiceError.InvalidImage
+        is FrameCaptureException -> when (error) {
+            FrameCaptureError.SourceDisconnected -> VoiceError.SourceDisconnected
+            else -> VoiceError.InvalidImage
+        }
         is MediaCaptureException -> when (error) {
             MediaCaptureError.AudioUnavailable -> VoiceError.MicPermissionDenied
             else -> VoiceError.MediaFailed
@@ -404,8 +477,20 @@ class VoiceAssistantViewModel @Inject constructor(
     }
 
     companion object {
+        internal fun mediaConfirmation(utterance: String, video: Boolean): String {
+            val normalized = java.text.Normalizer.normalize(utterance, java.text.Normalizer.Form.NFD)
+                .replace(Regex("\\p{M}+"), "").lowercase(java.util.Locale.ROOT).replace('đ', 'd')
+            // Local device commands use their Vietnamese action words, including unaccented input.
+            val vietnamese = Regex("\\b(chup|anh|hinh|quay|ghi hinh)\\b").containsMatchIn(normalized)
+            return if (vietnamese) {
+                if (video) VIDEO_SAVED_CONFIRMATION else PHOTO_SAVED_CONFIRMATION
+            } else {
+                if (video) "Video recorded and saved." else "Photo taken and saved."
+            }
+        }
+
         private const val TAG = "VoiceAssistantVM"
-        const val PHOTO_SAVED_CONFIRMATION = "Photo saved."
-        const val VIDEO_SAVED_CONFIRMATION = "Video saved."
+        const val PHOTO_SAVED_CONFIRMATION = "Đã chụp và lưu ảnh."
+        const val VIDEO_SAVED_CONFIRMATION = "Đã quay và lưu video."
     }
 }

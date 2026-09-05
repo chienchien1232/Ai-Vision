@@ -6,6 +6,7 @@ import com.rayban.ai.domain.model.MediaType
 enum class AssistantPhase {
     Idle,
     Listening,
+    Transcribing,
     Processing,
     Speaking,
     Recording,
@@ -18,6 +19,7 @@ data class MediaMessage(
 
 data class VoiceUiState(
     val phase: AssistantPhase = AssistantPhase.Idle,
+    val isSynthesizing: Boolean = false,
     val turns: List<ConversationTurn> = emptyList(),
     val error: VoiceError? = null,
     val errorMessage: String? = null,
@@ -27,13 +29,22 @@ data class VoiceUiState(
 
 enum class VoiceError {
     MicPermissionDenied,
+    VoiceLanguageUnavailable,
+    VoiceSynthesisFailed,
     RecognizerUnavailable,
+    SpeechMissingApiKey,
+    SpeechAccessDenied,
+    SpeechModelUnavailable,
+    SpeechInvalidRequest,
     NoMatch,
     SpeechNetwork,
+    SpeechRateLimited,
+    SpeechTimeout,
     SpeechAudio,
     Network,
     Timeout,
     InvalidImage,
+    SourceDisconnected,
     ProviderUnavailable,
     RateLimited,
     Cancelled,

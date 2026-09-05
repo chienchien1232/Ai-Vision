@@ -1,13 +1,22 @@
 package com.rayban.ai.di
 
 import com.rayban.ai.BuildConfig
-import com.rayban.ai.core.audio.AndroidSpeechToText
-import com.rayban.ai.core.audio.AndroidTextSpeaker
+import com.rayban.ai.core.audio.ActiveSpeechToText
+import com.rayban.ai.core.audio.CloudSpeechToText
+import com.rayban.ai.core.audio.PhoneWearableMicrophone
+import com.rayban.ai.data.audio.GeminiAudioTranscriber
+import com.rayban.ai.domain.audio.AudioTranscriber
+import com.rayban.ai.core.audio.FakeGlassesSpeechToText
+import com.rayban.ai.core.camera.ActiveImageSource
+import com.rayban.ai.core.camera.ActiveWearableCamera
+import com.rayban.ai.core.camera.CameraPreviewController
+import com.rayban.ai.core.camera.FakeGlassesCamera
 import com.rayban.ai.core.camera.PhoneCameraSource
 import com.rayban.ai.data.assistant.GeminiAssistantEngine
 import com.rayban.ai.data.assistant.MockAssistantEngine
 import com.rayban.ai.data.context.InMemoryConversationContext
 import com.rayban.ai.data.device.DeviceStatusRepositoryImpl
+import com.rayban.ai.data.device.InMemoryActiveWearableSession
 import com.rayban.ai.data.processing.BitmapFramePreprocessor
 import com.rayban.ai.data.processing.ValidatingFrameProcessor
 import com.rayban.ai.data.vision.GeminiVisionEngine
@@ -23,6 +32,7 @@ import com.rayban.ai.domain.processor.FramePreprocessor
 import com.rayban.ai.domain.processor.FrameProcessor
 import com.rayban.ai.domain.repository.DeviceStatusRepository
 import com.rayban.ai.domain.repository.ImageSource
+import com.rayban.ai.domain.wearable.ActiveWearableSession
 import com.rayban.ai.domain.usecase.AnalyzeImageUseCase
 import com.rayban.ai.domain.usecase.AskAssistantUseCase
 import com.rayban.ai.domain.usecase.CaptureFrameUseCase
@@ -33,7 +43,6 @@ import com.rayban.ai.domain.usecase.StopVideoRecordingUseCase
 import com.rayban.ai.domain.usecase.TakePhotoUseCase
 import com.rayban.ai.domain.vision.VisionEngine
 import com.rayban.ai.domain.wearable.WearableCamera
-import dagger.Binds
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -53,8 +62,14 @@ object AppModule {
 
     @Provides
     @Singleton
-    fun provideDeviceStatusRepository(): DeviceStatusRepository =
-        DeviceStatusRepositoryImpl()
+    fun provideActiveWearableSession(): ActiveWearableSession =
+        InMemoryActiveWearableSession()
+
+    @Provides
+    @Singleton
+    fun provideDeviceStatusRepository(
+        session: ActiveWearableSession,
+    ): DeviceStatusRepository = DeviceStatusRepositoryImpl(session)
 
     @Provides
     fun provideObserveDeviceStatusUseCase(
@@ -150,37 +165,73 @@ object AppModule {
 
 @Module
 @InstallIn(SingletonComponent::class)
-abstract class AudioModule {
-    @Binds
+object AudioModule {
+    @Provides
     @Singleton
-    abstract fun bindSpeechToText(
-        impl: AndroidSpeechToText,
-    ): SpeechToText
+    fun provideAudioTranscriber(): AudioTranscriber = GeminiAudioTranscriber(
+        apiKey = BuildConfig.GEMINI_API_KEY,
+        model = BuildConfig.GEMINI_STT_MODEL,
+    )
 
-    @Binds
+    @Provides
     @Singleton
-    abstract fun bindTextSpeaker(
-        impl: AndroidTextSpeaker,
-    ): TextSpeaker
+    fun provideCloudSpeechToText(
+        microphone: PhoneWearableMicrophone,
+        transcriber: AudioTranscriber,
+    ): CloudSpeechToText = CloudSpeechToText(
+        microphone, transcriber, CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate),
+    )
+    /**
+     * The mic pipeline always talks to this delegate; it forwards to the phone
+     * recognizer or the glasses transcription backend based on the session.
+     */
+    @Provides
+    @Singleton
+    fun provideSpeechToText(
+        session: ActiveWearableSession,
+        phone: CloudSpeechToText,
+        glasses: FakeGlassesSpeechToText,
+    ): SpeechToText = ActiveSpeechToText(session, phone, glasses)
+
+    @Provides
+    @Singleton
+    fun provideTextSpeaker(
+        @dagger.hilt.android.qualifiers.ApplicationContext context: android.content.Context,
+    ): TextSpeaker = com.rayban.ai.core.audio.CloudTextSpeaker(
+        com.rayban.ai.data.audio.GeminiSpeechSynthesizer(BuildConfig.GEMINI_API_KEY,
+            BuildConfig.GEMINI_TTS_MODEL, BuildConfig.GEMINI_TTS_VOICE),
+        com.rayban.ai.core.audio.AndroidSpeechAudioPlayer(context),
+        CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate),
+    )
 }
 
 @Module
 @InstallIn(SingletonComponent::class)
-abstract class CameraModule {
-    @Binds
+object CameraModule {
+    /**
+     * The vision pipeline always talks to these delegates; they forward to the
+     * phone camera or the glasses camera based on the session. Swapping in the
+     * real ESP32 implementations later only changes these three methods.
+     */
+    @Provides
     @Singleton
-    abstract fun bindImageSource(
-        impl: PhoneCameraSource,
-    ): ImageSource
+    fun provideImageSource(
+        session: ActiveWearableSession,
+        phone: PhoneCameraSource,
+        glasses: FakeGlassesCamera,
+    ): ImageSource = ActiveImageSource(session, phone, glasses)
 
-    @Binds
+    @Provides
     @Singleton
-    abstract fun bindWearableCamera(
-        impl: PhoneCameraSource,
-    ): WearableCamera
+    fun provideWearableCamera(
+        session: ActiveWearableSession,
+        phone: PhoneCameraSource,
+        glasses: FakeGlassesCamera,
+        appScope: CoroutineScope,
+    ): WearableCamera = ActiveWearableCamera(session, phone, glasses, appScope)
 
-    @Binds
-    abstract fun bindPreviewController(
+    @Provides
+    fun providePreviewController(
         impl: PhoneCameraSource,
-    ): com.rayban.ai.core.camera.CameraPreviewController
+    ): CameraPreviewController = impl
 }

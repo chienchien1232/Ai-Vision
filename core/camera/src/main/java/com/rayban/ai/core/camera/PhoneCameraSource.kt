@@ -4,7 +4,6 @@ import android.content.ContentValues
 import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
-import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
 import android.util.Log
@@ -59,6 +58,7 @@ import kotlinx.coroutines.withContext
 class PhoneCameraSource @Inject constructor(
     @param:ApplicationContext private val context: Context,
     private val appScope: CoroutineScope,
+    private val gallery: GalleryMediaStore,
 ) : ImageSource, CameraPreviewController, WearableCamera {
 
     private val appContext = context.applicationContext
@@ -284,7 +284,8 @@ class PhoneCameraSource @Inject constructor(
             ?: throw MediaCaptureException(MediaCaptureError.CaptureFailed, "Failed to capture photo")
 
         try {
-            val uri = withContext(Dispatchers.IO) { insertPhotoIntoGallery(file, timestamp) }
+            val bytes = withContext(Dispatchers.IO) { file.readBytes() }
+            val uri = withContext(Dispatchers.IO) { gallery.savePhoto(bytes, timestamp) }
             Log.d(TAG, "[Camera] Photo saved uri=$uri")
             MediaAsset(
                 uri = uri.toString(),
@@ -296,41 +297,6 @@ class PhoneCameraSource @Inject constructor(
                 file.delete()
             } catch (_: Exception) {
             }
-        }
-    }
-
-    private fun insertPhotoIntoGallery(file: File, timestamp: Long): Uri {
-        val resolver = appContext.contentResolver
-        val values = ContentValues().apply {
-            put(MediaStore.Images.Media.DISPLAY_NAME, "glass_photo_$timestamp.jpg")
-            put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                put(MediaStore.Images.Media.RELATIVE_PATH, PHOTO_RELATIVE_PATH)
-                put(MediaStore.Images.Media.IS_PENDING, 1)
-            }
-        }
-        val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
-            ?: throw MediaCaptureException(MediaCaptureError.StorageUnavailable, "Could not create gallery entry")
-        try {
-            resolver.openOutputStream(uri)?.use { output ->
-                file.inputStream().use { input -> input.copyTo(output) }
-            } ?: throw MediaCaptureException(
-                MediaCaptureError.StorageUnavailable,
-                "Could not open gallery output stream",
-            )
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                val publish = ContentValues().apply {
-                    put(MediaStore.Images.Media.IS_PENDING, 0)
-                }
-                resolver.update(uri, publish, null, null)
-            }
-            return uri
-        } catch (e: MediaCaptureException) {
-            resolver.delete(uri, null, null)
-            throw e
-        } catch (e: Exception) {
-            resolver.delete(uri, null, null)
-            throw MediaCaptureException(MediaCaptureError.StorageUnavailable, "Failed to write photo", e)
         }
     }
 
@@ -503,7 +469,6 @@ class PhoneCameraSource @Inject constructor(
 
     companion object {
         private const val TAG = "PhoneCameraSource"
-        private const val PHOTO_RELATIVE_PATH = "Pictures/AI Smart Glasses"
         private const val VIDEO_RELATIVE_PATH = "Movies/AI Smart Glasses"
     }
 }

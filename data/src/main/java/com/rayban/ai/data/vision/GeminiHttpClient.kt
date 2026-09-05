@@ -36,7 +36,8 @@ class OkHttpGeminiHttpClient(
         requestJson: String,
     ): HttpResponse = suspendCancellableCoroutine { continuation ->
         val request = Request.Builder()
-            .url("$BASE_URL/models/$model:generateContent?key=$apiKey")
+            .url("$BASE_URL/models/$model:generateContent")
+            .header("x-goog-api-key", apiKey)
             .header("Content-Type", "application/json")
             .post(requestJson.toRequestBody(JSON_MEDIA_TYPE))
             .build()
@@ -70,6 +71,7 @@ class OkHttpGeminiHttpClient(
 
         fun defaultClient(): OkHttpClient = OkHttpClient.Builder()
             .connectTimeout(10, TimeUnit.SECONDS)
+            .callTimeout(60, TimeUnit.SECONDS)
             .readTimeout(60, TimeUnit.SECONDS)
             .build()
     }

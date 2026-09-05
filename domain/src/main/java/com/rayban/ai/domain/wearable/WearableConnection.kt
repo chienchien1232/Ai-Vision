@@ -37,4 +37,13 @@ sealed interface WearableConnectionState {
 sealed interface WearableEvent {
     data object LinkLost : WearableEvent
     data class DeviceLog(val message: String) : WearableEvent
+
+    /**
+     * Physical button on the glasses was pressed (e.g. shutter / assistant key).
+     * The app maps this to a voice-pipeline entry point such as "describe the scene".
+     */
+    data class ButtonPressed(
+        val buttonId: Int,
+        val pressedAtMillis: Long,
+    ) : WearableEvent
 }

@@ -51,6 +51,9 @@ class GeminiAssistantEngineTest {
             .getAsJsonArray("parts")[0].asJsonObject
             .get("text").asString
         assertTrue(systemInstruction.contains("smart glasses"))
+        assertTrue(systemInstruction.contains("language of the CURRENT user's question"))
+        assertTrue(systemInstruction.contains("Vietnamese typed without diacritics"))
+        assertTrue(systemInstruction.contains("preserve its original wording and language"))
 
         val contents = root.getAsJsonArray("contents")
         assertEquals(3, contents.size())
