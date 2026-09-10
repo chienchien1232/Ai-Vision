@@ -1,17 +1,26 @@
-# Android
-/app/build/
-/build/
-*.apk
-local.properties
-
-# ESP-IDF
-firmware/build/
-firmware/sdkconfig
-__pycache__/
-*.pyc
-
-# General
-.DS_Store
-.idea/
 *.iml
-.vscode/
+.gradle
+/local.properties
+/.idea/caches
+/.idea/libraries
+/.idea/modules.xml
+/.idea/workspace.xml
+/.idea/navEditor.xml
+/.idea/assetWizardSettings.xml
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+**/build/
+**/.gradle/
+**/.kotlin/
+**/.idea/
+firmware/sdkconfig
+firmware/sdkconfig.old
+firmware/managed_components/
+secrets.h
+.env
+.env.*
+!.env.example

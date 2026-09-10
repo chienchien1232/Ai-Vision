@@ -1,8 +1,3 @@
-# Backend — Nguoi 3, tao o moc AI
-Placeholder cho server giu API key, proxy Gemini, gioi han su dung.
+# Backend
 
-Chay thu:
-```
-pip install -r requirements.txt
-python app.py
-```
+Chưa triển khai. Phần này sẽ giữ khóa API của dự án và chuyển yêu cầu tới cloud khi tới mốc AI. Không đưa khóa bí mật vào app hoặc Git.

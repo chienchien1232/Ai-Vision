@@ -1,7 +1,11 @@
-# Hardware — Nguoi 2
+# Phần cứng
 
-- Board: ESP32-S3 Sense
-- Camera: OV2640, XCLK pin 15 (xem `board/board_config.cpp`)
-- Mic: I2S WS 42, PCM 16kHz mono
-- Luu tru: SD card cho video/audio
-- Pin nguon, so do chan se bo sung kem anh mach
+- Board dự kiến: Seeed Studio XIAO ESP32-S3 Sense.
+- Trạng thái: chưa nhận phần cứng.
+- Camera thực tế: chưa xác nhận.
+- microSD và dung lượng: chưa xác nhận.
+- Loa và mạch đầu ra âm thanh: chưa xác nhận.
+- Sơ đồ chân: chờ đối chiếu đúng board và camera thực tế.
+- Firmware boot trên board: chưa kiểm tra.
+
+Không dùng thử nghiệm mic/camera điện thoại để nghiệm thu phần cứng kính.

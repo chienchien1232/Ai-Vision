@@ -1,7 +1,1 @@
-# Nguoi 1 viet, Nguoi 2 review
-CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
-CONFIG_PARTITION_TABLE_CUSTOM=y
-CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
-CONFIG_SPIRAM_SIZE_8MB=y
-CONFIG_CAMERA_PIN_XCLK=15
-CONFIG_MIC_I2S_WS=42
+# Board-specific options will be set after the actual hardware is verified.
