@@ -1,0 +1,17 @@
+# Android
+/app/build/
+/build/
+*.apk
+local.properties
+
+# ESP-IDF
+firmware/build/
+firmware/sdkconfig
+__pycache__/
+*.pyc
+
+# General
+.DS_Store
+.idea/
+*.iml
+.vscode/
