@@ -1,0 +1,14 @@
+Vietnamese offline TTS: vits-piper-vi_VN-vais1000-medium
+Model: https://huggingface.co/rhasspy/piper-voices/tree/main/vi/vi_VN/vais1000/medium
+Converted model: https://github.com/k2-fsa/sherpa-onnx/releases/tag/tts-models
+Archive SHA256: fa1367710767d36ed5cf13b4a449e20c35ffd12791c2e47c2e64142bfa55551a
+Model card: Vietnamese, one speaker, 22050 Hz, medium quality, fine-tuned from lessac medium.
+Dataset: VAIS-1000 Vietnamese Speech Synthesis Corpus; CC BY 4.0.
+https://ieee-dataport.org/documents/vais-1000-vietnamese-speech-synthesis-corpus
+https://creativecommons.org/licenses/by/4.0/
+Preset PCM is generated from this model; resampled to 16000 Hz by Ai-Vision.
+Piper voices repository: MIT; sherpa-onnx 1.13.8: Apache-2.0.
+eSpeak NG data/native phonemization: upstream GPL-3.0-or-later; COPYING is included.
+Source: https://github.com/espeak-ng/espeak-ng/tree/1.52.0
+Check all native-library/model/data redistribution obligations before commercial distribution.
+This notice is attribution, not a legal clearance for shipping a commercial APK.
