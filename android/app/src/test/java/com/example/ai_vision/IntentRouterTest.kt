@@ -75,4 +75,71 @@ class IntentRouterTest {
         assertEquals("SCENE_QUESTION", CloudPolicy.reason(IntentRouter.route("Giải thích chữ trong ảnh này")))
         assertEquals("SCENE_QUESTION", CloudPolicy.reason(IntentRouter.route("Trước mặt tôi có gì?")))
     }
+
+    @Test fun questionParticleAndZeroAreNotActionNegation() {
+        listOf("Đây có phải chai nước không?", "Vật này có nguy hiểm không?", "Is this a bottle?").forEach {
+            assertEquals(it, AppIntent.Question(it, true), IntentRouter.route(it))
+        }
+        listOf("Không khí là gì?", "Tại sao không có mưa?", "Why don't birds have teeth?").forEach {
+            assertEquals(it, AppIntent.Question(it, false), IntentRouter.route(it))
+        }
+        assertEquals("2", LocalAnswerHandler.answer(IntentRouter.route("không cộng hai"), "vi-VN"))
+        listOf("Kính ơi, đừng chụp ảnh", "Tôi không muốn chụp ảnh", "Không được đọc chữ", "do not record video").forEach {
+            val intent = IntentRouter.route(it)
+            assertTrue(it, intent is AppIntent.Clarification)
+            assertNull(CloudPolicy.reason(intent))
+        }
+    }
+
+    @Test fun naturalSceneRequestsRequireFreshPhotoButUnclearRequestsAskLocally() {
+        listOf("Mô tả căn phòng", "Nhìn giúp tôi", "Vật bên trái là gì?", "Vật bên phải là gì?", "Describe the room").forEach {
+            assertEquals(it, AppIntent.Question(it, true), IntentRouter.route(it))
+            assertEquals("SCENE_QUESTION", CloudPolicy.reason(IntentRouter.route(it)))
+        }
+        listOf("Đọc giúp tôi", "Xem giúp tôi", "Xem cái này", "Look at this").forEach {
+            val intent = IntentRouter.route(it)
+            assertTrue(it, intent is AppIntent.Clarification)
+            assertNull(CloudPolicy.reason(intent))
+        }
+    }
+
+    @Test fun spokenNumbersUseLocalArithmeticWithoutGuessingUnsupportedNumbers() {
+        val examples = mapOf(
+            "hai cộng ba" to "5", "hai cộng ba bằng bao nhiêu" to "5", "Tính hai mươi mốt trừ bốn" to "17",
+            "một trăm lẻ năm nhân hai" to "210", "hai mươi tư cộng mười lăm" to "39",
+            "âm hai nhân ba" to "-6", "hai phẩy năm cộng 3" to "5.5",
+            "chín trăm chín mươi chín trừ chín" to "990", "8 chia không" to "Không thể chia cho không.",
+            "two plus three" to "5", "one hundred and five minus twenty one" to "84",
+            "negative two times three" to "-6", "two point five divided by zero point five" to "5",
+            "2+3" to "5", "-2 * -3" to "6"
+        )
+        examples.forEach { (text, result) ->
+            val intent = IntentRouter.route(text)
+            assertTrue(text, intent is AppIntent.Calculate)
+            assertNull(CloudPolicy.reason(intent))
+            assertEquals(text, result, LocalAnswerHandler.answer(intent, "vi-VN"))
+        }
+        listOf("Tính hai ba cộng bốn", "một triệu cộng hai", "một triệu cộng hai triệu", "one thousand plus two thousand",
+            "calculate twenty hundred plus one").forEach {
+            val intent = IntentRouter.route(it)
+            assertTrue(it, intent is AppIntent.Clarification)
+            assertNull(CloudPolicy.reason(intent))
+        }
+    }
+
+    @Test fun everySupportedLocalIntentHasNoCloudReason() {
+        listOf("Chụp ảnh", "Đọc chữ", "Đọc tiếp", "Phát lại", "Dừng", "Quay video", "Dừng quay video",
+            "Trạng thái kính", "Ping", "Mấy giờ", "Hôm nay ngày mấy", "Hai cộng ba", "Tăng âm lượng",
+            "Đừng chụp ảnh", "Xem giúp tôi").forEach { assertNull(it, CloudPolicy.reason(IntentRouter.route(it))) }
+    }
+
+    @Test fun incompleteArithmeticAndUnaccentedNegationAskLocally() {
+        listOf("Tính", "Tính hai", "Hai cộng", "8 chia", "calculate", "two plus", "dung chup anh", "dung doc chu").forEach {
+            assertTrue(it, IntentRouter.route(it) is AppIntent.Clarification)
+            assertNull(it, CloudPolicy.reason(IntentRouter.route(it)))
+        }
+        assertEquals(AppIntent.StopSpeaking, IntentRouter.route("Dừng nói"))
+        assertEquals(AppIntent.StopVideo, IntentRouter.route("dung quay video"))
+        assertTrue(IntentRouter.route("Nhân vật này là ai?") is AppIntent.Question)
+    }
 }

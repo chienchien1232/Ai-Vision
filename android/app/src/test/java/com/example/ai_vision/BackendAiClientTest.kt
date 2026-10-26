@@ -3,6 +3,10 @@ package com.example.ai_vision
 import com.example.ai_vision.ai.requireGlassesPcm
 import com.example.ai_vision.ai.AiBackendHttpException
 import com.example.ai_vision.ai.validateBackendUrl
+import com.example.ai_vision.ai.requireBackendSession
+import com.example.ai_vision.ai.backendText
+import java.io.IOException
+import org.json.JSONObject
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
@@ -37,5 +41,17 @@ class BackendAiClientTest {
         assertThrows(IllegalArgumentException::class.java) { requireGlassesPcm(ByteArray(0)) }
         assertThrows(IllegalArgumentException::class.java) { requireGlassesPcm(ByteArray(3)) }
         assertThrows(IllegalArgumentException::class.java) { requireGlassesPcm(ByteArray(16000 * 2 * 30 + 2)) }
+    }
+
+    @Test fun responseRequiresExactSessionAndActualText() {
+        val valid = JSONObject().put("sessionId", "session-1").put("answer", "  Xin chào  ")
+        requireBackendSession(valid, "session-1")
+        assertEquals("Xin chào", backendText(valid, "answer"))
+        assertThrows(IOException::class.java) { requireBackendSession(valid, "session-2") }
+        assertThrows(IOException::class.java) { requireBackendSession(JSONObject().put("sessionId", 1), "1") }
+        for (value in listOf<Any>(JSONObject.NULL, 5, JSONObject(), "   ")) {
+            assertThrows(IOException::class.java) { backendText(JSONObject().put("answer", value), "answer") }
+        }
+        assertThrows(IOException::class.java) { backendText(JSONObject(), "transcript") }
     }
 }

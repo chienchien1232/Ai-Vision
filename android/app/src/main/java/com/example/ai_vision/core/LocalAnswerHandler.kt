@@ -32,7 +32,9 @@ object LocalAnswerHandler {
                 }
                 result.stripTrailingZeros().toPlainString()
             }
-            is AppIntent.Clarification -> intent.message
+            is AppIntent.Clarification -> if (english && intent.topic == AppIntent.Clarification.Topic.READ_OR_DESCRIBE)
+                "Would you like me to read text or describe the scene? Say read text or describe the scene."
+                else intent.message
             else -> error("Intent has no local answer")
         }
     }

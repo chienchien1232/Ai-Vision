@@ -28,6 +28,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import androidx.compose.ui.Modifier
@@ -59,8 +61,16 @@ fun DeviceScreen(owner: DeviceViewModel = viewModel()) {
             viewModel.reportPermissionDenied()
         }
     }
+    var microphoneAction by remember { mutableStateOf("phone") }
+    fun startMicrophoneAction() {
+        when (microphoneAction) {
+            "wake" -> viewModel.listenOnGlasses()
+            "diagnostic" -> viewModel.testMicrophone()
+            else -> viewModel.listenOnPhone()
+        }
+    }
     val microphoneLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-        if (granted) viewModel.listenOnPhone() else viewModel.reportMicrophonePermissionDenied()
+        if (granted) startMicrophoneAction() else viewModel.reportMicrophonePermissionDenied()
     }
     val device = viewModel.deviceState
     val action = viewModel.actionState
@@ -151,6 +161,7 @@ fun DeviceScreen(owner: DeviceViewModel = viewModel()) {
             Button(
                 enabled = action !is ActionState.Running && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S,
                 onClick = {
+                    microphoneAction = "phone"
                     if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
                         viewModel.listenOnPhone()
                     } else {
@@ -180,13 +191,26 @@ fun DeviceScreen(owner: DeviceViewModel = viewModel()) {
         Text("Nói ‘đọc chữ trước mặt tôi’ để dùng OCR local. Nói ‘trước mặt tôi có gì’ để hỏi Gemini. Camera hiện QVGA: đưa kính gần chữ và giữ yên.")
         if (viewModel.demoMode) Text("OCR Demo chỉ đọc chữ trên ảnh giả do app tạo, không phải ảnh kính thật.")
         if (viewModel.ocrStatus.isNotBlank()) Text(viewModel.ocrStatus)
-        if (!viewModel.demoMode && connected) {
-            Button(enabled = !viewModel.isRecording && action !is ActionState.Running, onClick = viewModel::testMicrophone) {
+        if (connected) {
+            if (viewModel.demoMode) Text("WAKE AI Demo dùng mic và loa Android, STT offline; camera vẫn là ảnh giả lập.")
+            Button(enabled = !viewModel.isRecording && action !is ActionState.Running, onClick = {
+                microphoneAction = "diagnostic"
+                if (!viewModel.demoMode || ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                    viewModel.testMicrophone()
+                } else microphoneLauncher.launch(Manifest.permission.RECORD_AUDIO)
+            }) {
                 Text("Mic diagnostics (8s, no STT)")
             }
-            Button(enabled = !viewModel.isRecording && action !is ActionState.Running, onClick = viewModel::listenOnGlasses) {
-                Text("WAKE AI — nói trên mic kính")
+            Button(enabled = !viewModel.isRecording && action !is ActionState.Running, onClick = {
+                microphoneAction = "wake"
+                if (!viewModel.demoMode || ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                    viewModel.listenOnGlasses()
+                } else microphoneLauncher.launch(Manifest.permission.RECORD_AUDIO)
+            }) {
+                Text(if (viewModel.demoMode) "WAKE AI — mic Android (Demo)" else "WAKE AI — nói trên mic kính")
             }
+        }
+        if (!viewModel.demoMode && connected) {
             Button(enabled = action !is ActionState.Running, onClick = viewModel::toggleRecording) {
                 Text(if (viewModel.isRecording) "Stop video" else "Record video")
             }

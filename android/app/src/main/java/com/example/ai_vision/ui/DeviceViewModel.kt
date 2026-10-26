@@ -15,7 +15,8 @@ import com.example.ai_vision.device.GlassesRuntime
 import com.example.ai_vision.device.GlassesConnectionService
 import kotlinx.coroutines.CoroutineScope
 import com.example.ai_vision.device.CapturedImage
-import com.example.ai_vision.device.FakeGlassSession
+import com.example.ai_vision.device.DemoVoiceSession
+import com.example.ai_vision.voice.PhonePcmRecorder
 import com.example.ai_vision.device.GlassBleProvisioner
 import com.example.ai_vision.device.GlassSession
 import com.example.ai_vision.device.GlassCommandException
@@ -30,6 +31,7 @@ import com.example.ai_vision.media.GalleryPhotoSaver
 import com.example.ai_vision.media.MediaSaveException
 import com.example.ai_vision.core.AppIntent
 import com.example.ai_vision.core.IntentRouter
+import com.example.ai_vision.core.ConversationRouter
 import com.example.ai_vision.core.LocalAnswerHandler
 import com.example.ai_vision.core.CloudPolicy
 import com.example.ai_vision.core.SettingsStore
@@ -84,7 +86,9 @@ class DeviceController(private val application: Application, private val runtime
     private val textReader: TextReader = LocalTextReader(),
     private val aiClient: AiClient = BackendAiClient(),
     private val localSpeech: SpeechToTextEngine = LocalSpeechToTextEngine(application),
-    private val demoSessionFactory: () -> GlassSession = { FakeGlassSession() }) {
+    private val demoSessionFactory: () -> GlassSession = {
+        DemoVoiceSession(runtimeScope) { PhonePcmRecorder(application).record() }
+    }) {
     private val settings = SettingsStore(application)
     private val restoredSettings = settings.load()
     var deviceState by mutableStateOf<DeviceState>(DeviceState.Disconnected)
@@ -107,6 +111,7 @@ class DeviceController(private val application: Application, private val runtime
     var voicePhase by mutableStateOf(VoicePhase.IDLE)
         private set
     private val voiceSession = VoiceSessionState()
+    private val conversation = ConversationRouter()
     private val earlyVoiceEvents = ArrayDeque<GlassVoiceEvent>()
     private var actionEpoch = 0L
     var demoMode by mutableStateOf(false)
@@ -124,6 +129,7 @@ class DeviceController(private val application: Application, private val runtime
     var taskResultText by mutableStateOf("")
         private set
     private var lastReply by mutableStateOf<ReplyAudio?>(null)
+    private var replyBeforeAction: ReplyAudio? = null
     val canReplayAudio: Boolean get() = lastReply != null
     var ocrStatus by mutableStateOf("")
         private set
@@ -152,6 +158,7 @@ class DeviceController(private val application: Application, private val runtime
 
     fun connect() {
         if (deviceState is DeviceState.Connecting || deviceState is DeviceState.Connected) return
+        conversation.clear()
         closeConnections(stopService = false)
         actionState = ActionState.Idle
         micStatus = ""
@@ -166,6 +173,7 @@ class DeviceController(private val application: Application, private val runtime
             session = demoSessionFactory()
             deviceState = DeviceState.Connected("Demo device", true)
             watchVoiceEvents(session!!)
+            wakeStatus = "Demo: WAKE AI thu mic Android tối đa 8 giây; STT/TTS offline, ảnh giả lập"
             return
         }
         serviceEpoch++
@@ -205,6 +213,7 @@ class DeviceController(private val application: Application, private val runtime
     }
 
     fun disconnect(stopService: Boolean = true) {
+        conversation.clear()
         actionEpoch++
         voiceSession.clear()
         voicePhase = VoicePhase.IDLE
@@ -238,6 +247,7 @@ class DeviceController(private val application: Application, private val runtime
 
     fun changeLanguage() {
         if (actionState is ActionState.Running) return
+        conversation.clear()
         languageTag = if (languageTag == "vi-VN") "en-US" else "vi-VN"
         val voice = session as? GlassVoiceSession ?: return
         runAction("VOICE_CONFIG") {
@@ -255,13 +265,18 @@ class DeviceController(private val application: Application, private val runtime
     }
 
     fun submitInput() {
-        if (actionState is ActionState.Running) return
-        val intent = try {
-            IntentRouter.route(inputText, wakeWord)
-        } catch (error: IllegalArgumentException) {
-            actionState = ActionState.Error(error.message ?: "Empty input")
+        // Busy submissions must not consume the pending clarification.
+        if (actionState is ActionState.Running) {
+            if (runCatching { IntentRouter.route(inputText, wakeWord) }.getOrNull() == AppIntent.StopSpeaking) cancelAction()
             return
         }
+        val intent = try {
+            conversation.route(inputText, wakeWord)
+        } catch (error: IllegalArgumentException) {
+            if (actionState !is ActionState.Running) actionState = ActionState.Error(error.message ?: "Empty input")
+            return
+        }
+        if (actionState is ActionState.Running && intent != AppIntent.StopSpeaking) return
         when (intent) {
             AppIntent.Ping -> ping()
             AppIntent.Status -> getStatus()
@@ -283,12 +298,15 @@ class DeviceController(private val application: Application, private val runtime
         actionState = ActionState.Running("PHONE MIC DEMO")
         launchAction {
             try {
-                inputText = phoneSpeech.listen(languageTag)
+                val transcript = phoneSpeech.listen(languageTag)
+                currentCoroutineContext().ensureActive()
+                inputText = transcript
                 actionState = ActionState.Idle
                 submitInput()
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
+                currentCoroutineContext().ensureActive()
                 actionState = ActionState.Error(error.message ?: "Phone speech failed")
             }
         }
@@ -312,7 +330,7 @@ class DeviceController(private val application: Application, private val runtime
         activeSessionId = UUID.randomUUID().toString()
         pendingUtterance = null
         canRetryTranscription = false
-        micStatus = if (testOnly) "Recording mic diagnostics for 8 seconds..." else
+        micStatus = if (demoMode) "Demo: đang thu mic Android tối đa 8 giây${if (testOnly) "; không STT" else "; sau đó STT offline"}..." else if (testOnly) "Recording mic diagnostics for 8 seconds..." else
             "Nói trên kính; kết thúc sau khoảng lặng hoặc tối đa 8 giây..."
         activeDeviceAction = true
         val starting = if (testOnly) "MIC TEST" else "GLASSES MIC"
@@ -321,6 +339,7 @@ class DeviceController(private val application: Application, private val runtime
         launchAction {
             try {
                 val id = voiceTransport.startListening(languageTag, diagnostic = testOnly)
+                currentCoroutineContext().ensureActive()
                 this@DeviceController.voiceSession.bind(id)
                 voicePhase = VoicePhase.LISTENING
                 actionState = ActionState.Running(waiting)
@@ -341,6 +360,7 @@ class DeviceController(private val application: Application, private val runtime
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
+                currentCoroutineContext().ensureActive()
                 micTestOnly = false
                 activeDeviceAction = false
                 if (error !is GlassCommandException) disconnectAfterError()
@@ -352,6 +372,10 @@ class DeviceController(private val application: Application, private val runtime
 
     fun cancelAction() {
         if (voicePhase == VoicePhase.CANCELLING) return
+        conversation.clear()
+        // A reply being synthesized/played by a cancelled action is not replayable.
+        // Cancelling Replay itself keeps the previously completed reply.
+        if (actionState is ActionState.Running) lastReply = replyBeforeAction
         val wasUsingDevice = activeDeviceAction || voiceSession.sessionId != null
         advanceVoice(VoicePhase.CANCELLING)
         val previous = actionJob
@@ -432,6 +456,7 @@ class DeviceController(private val application: Application, private val runtime
                     AiBackendConfig(backendUrl, backendToken),
                     AiQuestion(sessionId, intent.text, photo?.jpeg)
                 )
+                currentCoroutineContext().ensureActive()
                 if (activeSessionId != sessionId) return@launchAction
                 answerText = answer
                 completeWithReply(answer, languageTag, sessionId, "Đã nhận câu trả lời AI")
@@ -537,6 +562,8 @@ class DeviceController(private val application: Application, private val runtime
                     }
                 } else if (photo != null && event.result == "SUCCESS") {
                     val captured = (session as? GlassVoiceSession ?: error("Glasses disconnected")).downloadPhoto(photo)
+                    currentCoroutineContext().ensureActive()
+                    if (activeSessionId != id) return@launchAction
                     image = captured
                     saveCapturedPhoto(captured)
                     completeWithReply(if (languageTag == "vi-VN") PHOTO_SAVED_VI else "Photo saved.", languageTag, id, "Ảnh đã lưu trên Android")
@@ -564,7 +591,8 @@ class DeviceController(private val application: Application, private val runtime
             activeDeviceAction = false
             val stats = inspectPcm16(event.pcm)
             micStatus = "Mic test: ${stats.samples / 16000.0}s, peak=${stats.peak}, RMS=${stats.rms}, near-clipped=${stats.nearClipped}"
-            actionState = ActionState.Success(micStatus)
+            advanceVoice(VoicePhase.ROUTING)
+            launchAction { actionState = ActionState.Success(micStatus) }
             return
         }
         actionJob?.cancel()
@@ -593,6 +621,7 @@ class DeviceController(private val application: Application, private val runtime
             try {
                 check(inspectPcm16(event.pcm).rms >= 100) { "Âm thanh quá nhỏ hoặc không có giọng nói. Hãy nói lại gần mic." }
                 val transcript = localSpeech.transcribe(event.pcm, event.languageTag)
+                currentCoroutineContext().ensureActive()
                 if (activeSessionId != sessionId) return@launchAction
                 inputText = transcript
                 pendingUtterance = null
@@ -649,11 +678,11 @@ class DeviceController(private val application: Application, private val runtime
 
     private fun recoverConnection(message: String) {
         if (deviceState is DeviceState.Connecting) return
+        conversation.clear()
         actionEpoch++
         voiceSession.clear()
         voicePhase = VoicePhase.IDLE
         earlyVoiceEvents.clear()
-        val endpoint = lastEndpoint ?: run { closeConnections(); deviceState = DeviceState.Error(message); return }
         actionJob?.cancel()
         activeSessionId = null
         activeDeviceAction = false
@@ -661,6 +690,7 @@ class DeviceController(private val application: Application, private val runtime
         isRecording = false
         speaker.stop()
         demoAudio.stop()
+        val endpoint = lastEndpoint ?: run { closeConnections(); deviceState = DeviceState.Error(message); return }
         heartbeatJob?.cancel()
         session?.disconnect()
         session = null
@@ -690,21 +720,28 @@ class DeviceController(private val application: Application, private val runtime
     }
 
     private suspend fun captureFreshPhoto(): CapturedImage = try {
-        (session ?: error("Glasses are not connected")).capture().also { image = it }
+        val photo = (session ?: error("Glasses are not connected")).capture()
+        currentCoroutineContext().ensureActive()
+        image = photo
+        photo
     } catch (error: CancellationException) {
         throw error
     } catch (error: Exception) {
+        currentCoroutineContext().ensureActive()
         // A failed media transfer can leave unread bytes on the TCP stream.
         if (error !is GlassCommandException) disconnectAfterError()
         throw error
     }
 
     fun ping() = runAction("PING") {
-        actionState = ActionState.Success((session ?: error("Glasses are not connected")).ping())
+        val result = (session ?: error("Glasses are not connected")).ping()
+        currentCoroutineContext().ensureActive()
+        actionState = ActionState.Success(result)
     }
 
     fun getStatus() = runAction("GET_STATUS") {
         val status = (session ?: error("Glasses are not connected")).getStatus()
+        currentCoroutineContext().ensureActive()
         val details = buildList {
             status.rssi?.let { add("RSSI: $it dBm") }
             status.cameraReady?.let { add("camera: ${if (it) "ready" else "off"}") }
@@ -716,6 +753,7 @@ class DeviceController(private val application: Application, private val runtime
 
     fun capture() = runAction("CAPTURE") {
         val photo = (session ?: error("Glasses are not connected")).capture()
+        currentCoroutineContext().ensureActive()
         image = photo
         saveCapturedPhoto(photo)
         activeDeviceAction = false
@@ -793,6 +831,7 @@ class DeviceController(private val application: Application, private val runtime
 
     private fun runReading(name: String, block: suspend (String) -> Unit) {
         if (actionState is ActionState.Running) return
+        conversation.clear()
         if (deviceState !is DeviceState.Connected) {
             actionState = ActionState.Error("Kết nối kính hoặc bật Demo để đọc chữ.")
             return
@@ -833,6 +872,7 @@ class DeviceController(private val application: Application, private val runtime
 
     fun replayAnswer() {
         if (actionState is ActionState.Running || isRecording) return
+        conversation.clear()
         val reply = lastReply ?: run { actionState = ActionState.Error("Chưa có phản hồi để phát lại"); return }
         val id = UUID.randomUUID().toString()
         activeSessionId = id
@@ -874,7 +914,7 @@ class DeviceController(private val application: Application, private val runtime
     }
 
     fun reportMicrophonePermissionDenied() {
-        actionState = ActionState.Error("Microphone permission is required for phone-mic demo")
+        actionState = ActionState.Error("Microphone permission is required for Android microphone input")
     }
 
     fun stopSpeaking() {
@@ -886,6 +926,8 @@ class DeviceController(private val application: Application, private val runtime
      * it keeps the phone speaker; anything else without V2 AUDIO_OUT is an error.
      */
     private suspend fun completeWithReply(text: String, language: String, id: String, success: String) {
+        currentCoroutineContext().ensureActive()
+        if (activeSessionId != id) return
         if (voiceSession.sessionId != null) advanceVoice(VoicePhase.SYNTHESIZING)
         taskResultText = success
         val reply = ReplyAudio(text, language, resultText = success)
@@ -911,18 +953,27 @@ class DeviceController(private val application: Application, private val runtime
     }
 
     private suspend fun playPcm(pcm: ByteArray) {
-        if (voiceSession.sessionId != null) advanceVoice(VoicePhase.PLAYING)
-        if (demoMode) { demoAudio.play(pcm); return }
+        currentCoroutineContext().ensureActive()
+        if (demoMode) {
+            if (voiceSession.sessionId != null) advanceVoice(VoicePhase.PLAYING)
+            demoAudio.play(pcm)
+            currentCoroutineContext().ensureActive()
+            return
+        }
         val voice = session as? GlassVoiceSession
             ?: throw IllegalStateException("Connect V2 glasses with speaker support to hear answers")
         if (!voice.supportsAudioOut()) throw IllegalStateException("Glasses speaker is unavailable")
+        currentCoroutineContext().ensureActive()
+        if (voiceSession.sessionId != null) advanceVoice(VoicePhase.PLAYING)
+        val id = activeSessionId
         activeDeviceAction = true
-        try { voice.playAudio(pcm) }
+        try { voice.playAudio(pcm); currentCoroutineContext().ensureActive() }
         catch (error: CancellationException) { throw error }
         catch (error: java.io.IOException) {
+            currentCoroutineContext().ensureActive()
             if (error !is GlassCommandException) recoverConnection("Audio connection lost")
             throw error
-        } finally { activeDeviceAction = false }
+        } finally { if (activeSessionId == id) activeDeviceAction = false }
     }
 
     private suspend fun recordingSession(): GlassVoiceSession {
@@ -970,6 +1021,7 @@ class DeviceController(private val application: Application, private val runtime
 
     private fun runAction(name: String, block: suspend () -> Unit) {
         if (deviceState !is DeviceState.Connected || actionState is ActionState.Running) return
+        conversation.clear()
         if (isRecording && name !in setOf("STOP_VIDEO", "PING", "GET_STATUS")) {
             actionState = ActionState.Error("Dừng quay video trước khi dùng mic/camera/loa")
             return
@@ -1012,6 +1064,7 @@ class DeviceController(private val application: Application, private val runtime
 
     /** One owner; STT handing off to another action supersedes its cleanup. */
     private fun launchAction(block: suspend CoroutineScope.() -> Unit) {
+        replyBeforeAction = lastReply
         val epoch = ++actionEpoch
         val job = runtimeScope.launch(start = CoroutineStart.LAZY) {
             try { block() }
@@ -1022,11 +1075,15 @@ class DeviceController(private val application: Application, private val runtime
                 if (epoch == actionEpoch && actionState !is ActionState.Running) {
                     val terminal = actionState
                     if (voiceSession.sessionId != null) {
+                        val finishingSession = session
                         advanceVoice(VoicePhase.CLEANING_UP)
                         actionState = ActionState.Running("FINISHING VOICE SESSION")
                         withContext(NonCancellable) {
-                            try { (session as? GlassVoiceSession)?.stopListening() }
-                            catch (error: Exception) { if (error !is GlassCommandException) recoverConnection("Voice cleanup failed") }
+                            try { withTimeout(5000) { (finishingSession as? GlassVoiceSession)?.stopListening() } }
+                            catch (error: Exception) {
+                                if (epoch == actionEpoch && session === finishingSession && error !is GlassCommandException)
+                                    recoverConnection("Voice cleanup failed")
+                            }
                         }
                     }
                     if (epoch == actionEpoch) {

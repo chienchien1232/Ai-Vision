@@ -1,5 +1,7 @@
 # Ai-Vision AI backend
 
+**Cập nhật phần mềm 26/10/2026:** 21 unittest đạt trên Python 3.14 với upstream mock. Đã bỏ phụ thuộc `audioop`, kiểm WAV/đáp ứng AI và chuẩn hóa lỗi mạng/timeout/JSON. [Chi tiết và cách chạy lại](../docs/hoan-thien-phan-mem-2026-10-26.md). Kết quả này kiểm phần mềm backend; trạng thái gọi Gemini thật gần nhất được ghi ở các mục lịch sử bên dưới.
+
 **Kiểm tra mới nhất 29/09/2026 lúc 16:43:** app → backend health 200 và token hợp lệ, nhưng Probe Gemini trả backend 502 / upstream 503; log trước đó có 502/504. PASS ở phần dưới là lịch sử một lượt trước đó trong ngày, không bảo đảm dịch vụ hiện sẵn sàng. Chưa thêm retry/đổi model. Xem [bàn giao cho lập trình viên AI](../docs/ban-giao-cho-lap-trinh-vien-ai-2026-09-29.md) cho đầu việc cloud/local và tiêu chí test.
 
 ## Khóa riêng cho backend local — 29/09/2026
@@ -34,7 +36,7 @@ Chỉ debug cho phép **đúng** URL HTTP loopback trên; release vẫn bắt bu
 
 ## Luồng local-first từ 28/09/2026
 
-App mới chỉ gọi `/v1/answer` cho câu hỏi ngoài các handler local; không gọi Gemini để phân loại độ khó. STT tiếng Việt/Anh và TTS nằm trên điện thoại; âm thanh đến từ mic kính. `/v1/transcribe` và `/v1/speak` giữ để tương thích nhưng mặc định trả HTTP 410 `LOCAL_AUDIO_ONLY`. Chỉ bật bằng `ENABLE_LEGACY_CLOUD_AUDIO=1` khi chủ động thử luồng cũ; phần resample audio cũ cần Python 3.10–3.12 vì audioop đã bị bỏ từ 3.13. Backend answer không còn import audioop khi khởi động.
+App mới chỉ gọi `/v1/answer` cho câu hỏi ngoài các handler local; không gọi Gemini để phân loại độ khó. STT tiếng Việt/Anh và TTS nằm trên điện thoại; âm thanh đến từ mic kính. `/v1/transcribe` và `/v1/speak` giữ để tương thích nhưng mặc định trả HTTP 410 `LOCAL_AUDIO_ONLY`. Chỉ bật bằng `ENABLE_LEGACY_CLOUD_AUDIO=1` khi chủ động thử luồng cũ. Bản cập nhật 26/10 dùng thư viện chuẩn để chuẩn hóa PCM, không còn cần audioop/Python <=3.12.
 
 Answer yêu cầu tối đa 3 câu/90 từ, `maxOutputTokens=512`, thinking low. Đây không phải hạn mức chi phí tuyệt đối. HTTP 429 từ Gemini được trả thành 429 `AI_QUOTA`; không tự retry. Probe cloud thật ngày28/09 thất bại xác thực; trạng thái mới nhất ở phần trên. Triển khai thật vẫn cần HTTPS reverse proxy, quota/rate limit ở tầng triển khai và API key đúng. Mô tả STT/TTS cloud bên dưới là luồng legacy opt-in, không phải đường mặc định của app mới.
 

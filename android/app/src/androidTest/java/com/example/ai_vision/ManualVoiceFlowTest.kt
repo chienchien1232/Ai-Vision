@@ -9,6 +9,9 @@ import com.example.ai_vision.speech.*
 import com.example.ai_vision.ui.*
 import com.example.ai_vision.voice.SpeechToTextEngine
 import java.net.SocketTimeoutException
+import kotlin.coroutines.Continuation
+import kotlin.coroutines.resume
+import kotlin.coroutines.suspendCoroutine
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.receiveAsFlow
@@ -36,10 +39,13 @@ class ManualVoiceFlowTest {
         override val voiceEvents = events.receiveAsFlow()
         var starts = 0; var stops = 0; var captures = 0; var downloads = 0
         var startError: Exception? = null
+        var startHook: (suspend () -> String)? = null
+        var captureHook: (suspend () -> CapturedImage)? = null
         var early: GlassVoiceEvent? = null
         override suspend fun startListening(languageTag: String, wakeWord: String, diagnostic: Boolean): String {
             assertEquals("", wakeWord); starts++
             startError?.let { throw it }
+            startHook?.let { return it() }
             early?.let { events.send(it); delay(50) }
             return "session-$starts"
         }
@@ -47,7 +53,7 @@ class ManualVoiceFlowTest {
         override suspend fun cancelActive() { stops++ }
         override suspend fun ping() = "PONG"
         override suspend fun getStatus() = GlassStatus(true)
-        override suspend fun capture(): CapturedImage { captures++; return FakeGlassSession().capture() }
+        override suspend fun capture(): CapturedImage { captures++; return captureHook?.invoke() ?: FakeGlassSession().capture() }
         override suspend fun downloadPhoto(reference: PhotoReference): CapturedImage { downloads++; return FakeGlassSession().capture() }
         override fun disconnect() { events.close() }
         override fun supportsWake() = false
@@ -61,10 +67,12 @@ class ManualVoiceFlowTest {
         override suspend fun acknowledgeMedia(mediaId: String) = Unit
     }
     private class Fixture(val transcript: String = "xin chào") {
-        val session = Session()
+        var session = Session()
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
         var transcriptions = 0; var answers = 0; var renders = 0; var plays = 0
         var blockedAnswer: CompletableDeferred<String>? = null
+        var transcriptionHook: (suspend () -> String)? = null
+        var audioStops = 0
         val ai = object : AiClient {
             override suspend fun answer(config: AiBackendConfig, question: AiQuestion): String {
                 answers++; return blockedAnswer?.await() ?: "Câu trả lời kiểm thử."
@@ -78,10 +86,10 @@ class ManualVoiceFlowTest {
                 override fun stop() {}; override fun close() {}
             }, demoAudio = object : PcmOutput {
                 override suspend fun play(pcm: ByteArray) { plays++ }
-                override fun stop() {}; override fun close() {}
+                override fun stop() { audioStops++ }; override fun close() {}
             }, demoAiClient = ai,
             localSpeech = object : SpeechToTextEngine {
-                override suspend fun transcribe(pcm: ByteArray, languageTag: String): String { transcriptions++; return transcript }
+                override suspend fun transcribe(pcm: ByteArray, languageTag: String): String { transcriptions++; return transcriptionHook?.invoke() ?: transcript }
             }, demoSessionFactory = { session })
         fun close() { controller.disconnect(); scope.cancel() }
     }
@@ -200,6 +208,143 @@ class ManualVoiceFlowTest {
                 assertEquals(0, fixture.transcriptions); assertEquals(0, fixture.answers)
                 assertEquals(VoicePhase.IDLE, c.voicePhase)
             }
+        } finally { main { fixture.close() } }
+    }
+
+    @Test fun diagnosticMicCleansUpAndAllowsAnotherManualWake() {
+        val fixture = Fixture(); val c = fixture.controller
+        try {
+            main {
+                c.demoMode = true; c.connect(); c.testMicrophone()
+                fixture.session.events.trySend(GlassVoiceEvent.Utterance("session-1", byteArrayOf(0, 16), "vi-VN"))
+            }
+            Thread.sleep(100); idle(c)
+            main {
+                assertEquals(VoicePhase.IDLE, c.voicePhase)
+                assertTrue(c.actionState is ActionState.Success)
+                assertEquals(0, fixture.transcriptions); assertEquals(0, fixture.answers)
+                assertEquals(1, fixture.session.stops)
+                c.listenOnGlasses(); assertEquals(2, fixture.session.starts)
+                c.cancelAction()
+            }
+            idle(c)
+        } finally { main { fixture.close() } }
+    }
+
+    @Test fun cancelledStartIgnoresLateAcknowledgmentAndCanStartAgain() {
+        val fixture = Fixture(); val c = fixture.controller
+        var acknowledgment: Continuation<String>? = null
+        try {
+            main {
+                c.demoMode = true; c.connect()
+                fixture.session.startHook = { suspendCoroutine { acknowledgment = it } }
+                c.listenOnGlasses(); assertNotNull(acknowledgment)
+                c.cancelAction()
+                acknowledgment!!.resume("session-1")
+            }
+            idle(c)
+            main {
+                assertEquals(ActionState.Idle, c.actionState); assertEquals(VoicePhase.IDLE, c.voicePhase)
+                assertTrue(c.deviceState is DeviceState.Connected)
+                fixture.session.startHook = null
+                c.listenOnGlasses(); assertEquals(2, fixture.session.starts)
+                c.cancelAction()
+            }
+            idle(c)
+        } finally { main { fixture.close() } }
+    }
+
+    @Test fun cancelledCaptureDoesNotPublishOrSaveLatePhotoBeforeNextLocalAnswer() {
+        val fixture = Fixture(); val c = fixture.controller
+        var result: Continuation<CapturedImage>? = null
+        try {
+            main {
+                c.demoMode = true; c.connect()
+                // A non-cooperative callback can still return after its coroutine is cancelled.
+                fixture.session.captureHook = { suspendCoroutine { result = it } }
+                c.capture(); assertNotNull(result)
+                c.cancelAction()
+                result!!.resume(CapturedImage(byteArrayOf(1, 2), 1, 1))
+            }
+            idle(c)
+            main {
+                assertNull(c.image); assertNull(c.savedPhotoUri); assertFalse(c.canReplayAudio)
+                assertEquals(0, fixture.plays)
+                c.inputText = "Hai cộng ba"; c.submitInput()
+            }
+            idle(c)
+            main { assertEquals("5", c.answerText); assertEquals(1, fixture.plays); assertEquals(0, fixture.answers) }
+        } finally { main { fixture.close() } }
+    }
+
+    @Test fun stopTextCancelsBusyActionAndOfflineCommandsNeverUseAi() {
+        val fixture = Fixture(); val c = fixture.controller
+        try {
+            main { c.demoMode = true; c.cloudEnabled = false; c.backendUrl = ""; c.backendToken = ""; c.connect() }
+            listOf("Chụp ảnh", "Bây giờ là mấy giờ", "Hai cộng ba", "Phát lại").forEach { text ->
+                main { c.inputText = text; c.submitInput() }; idle(c)
+                main { assertTrue(text, c.actionState is ActionState.Success) }
+            }
+            main { assertEquals(1, fixture.session.captures); assertEquals(0, fixture.answers) }
+
+            val wait = CompletableDeferred<String>(); fixture.blockedAnswer = wait
+            main {
+                c.inputText = "Vì sao bầu trời màu xanh?"; c.submitInput()
+                assertTrue(c.actionState is ActionState.Running)
+                c.inputText = "Dừng"; c.submitInput()
+            }
+            idle(c)
+            main { assertEquals(ActionState.Idle, c.actionState) }
+        } finally { main { fixture.close() } }
+    }
+
+    @Test fun disconnectDuringSttDropsLateTranscriptAfterReconnect() {
+        val fixture = Fixture(); val c = fixture.controller
+        var transcript: Continuation<String>? = null
+        try {
+            main {
+                fixture.transcriptionHook = { suspendCoroutine { transcript = it } }
+                c.demoMode = true; c.connect(); c.listenOnGlasses()
+                fixture.session.events.trySend(GlassVoiceEvent.Utterance("session-1", byteArrayOf(0, 16), "vi-VN"))
+            }
+            val deadline = android.os.SystemClock.elapsedRealtime() + 5000
+            while (transcript == null && android.os.SystemClock.elapsedRealtime() < deadline) Thread.sleep(20)
+            main {
+                assertNotNull(transcript)
+                c.disconnect()
+                fixture.session = Session(); fixture.transcriptionHook = null
+                c.connect(); c.inputText = "Hai cộng ba"; c.submitInput()
+            }
+            idle(c)
+            main { transcript!!.resume("Chụp ảnh") }
+            Thread.sleep(100)
+            main {
+                assertEquals("5", c.answerText); assertEquals(0, fixture.session.captures)
+                assertEquals(VoicePhase.IDLE, c.voicePhase); assertEquals(1, fixture.plays)
+                assertTrue(c.deviceState is DeviceState.Connected)
+            }
+        } finally { main { fixture.close() } }
+    }
+
+    @Test fun transportFailureStopsAudioAndReconnectDoesNotResendOldAiRequest() {
+        val fixture = Fixture("Vì sao bầu trời màu xanh?"); val c = fixture.controller
+        val result = CompletableDeferred<String>(); fixture.blockedAnswer = result
+        try {
+            main { c.demoMode = true; c.connect(); c.listenOnGlasses(); fixture.session.events.trySend(GlassVoiceEvent.Utterance("session-1", byteArrayOf(0, 16), "vi-VN")) }
+            val deadline = android.os.SystemClock.elapsedRealtime() + 5000
+            while (fixture.answers == 0 && android.os.SystemClock.elapsedRealtime() < deadline) Thread.sleep(20)
+            main { assertEquals(1, fixture.answers); fixture.session.events.trySend(GlassVoiceEvent.Failure("Demo link lost")) }
+            Thread.sleep(100); idle(c)
+            main {
+                assertTrue(c.deviceState is DeviceState.Error)
+                assertTrue(fixture.audioStops > 0)
+                assertEquals(VoicePhase.IDLE, c.voicePhase)
+                fixture.session = Session(); c.connect()
+                c.inputText = "Hai cộng ba"; c.submitInput()
+                result.complete("Old AI reply must not play")
+            }
+            idle(c)
+            main { assertEquals("5", c.answerText); assertEquals(1, fixture.answers); assertEquals(1, fixture.plays) }
         } finally { main { fixture.close() } }
     }
 }

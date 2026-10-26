@@ -17,7 +17,9 @@ sealed interface AppIntent {
         enum class Kind { TIME, DATE, GREETING, HELP }
     }
     data class Calculate(val left: String, val operator: String, val right: String) : AppIntent
-    data class Clarification(val message: String) : AppIntent
+    data class Clarification(val message: String, val topic: Topic? = null) : AppIntent {
+        enum class Topic { READ_OR_DESCRIBE }
+    }
     data class UnsupportedLocal(val feature: String) : AppIntent
     data class Question(val text: String, val needsFreshPhoto: Boolean) : AppIntent
 }
@@ -38,8 +40,16 @@ object IntentRouter {
         normalized = normalized
             .replace(Regex(" (nhe|nha|please)$"), "")
         val accented = Normalizer.normalize(text.lowercase(Locale.ROOT), Normalizer.Form.NFC)
-        if (Regex("(?<![\\p{L}\\p{N}])(đừng|không|do not|don't)(?![\\p{L}\\p{N}])").containsMatchIn(accented) || normalized.startsWith("khong ")) {
+        // Vietnamese "không" is also a question particle and the number zero.
+        // Negation must target an action, rather than merely occur in a question.
+        val negatedAction = Regex("^(?:(?:toi|minh|i) )?(?:khong(?: duoc| can| muon)?|do not|don't|dont|never) (?:chup|quay|doc|phat|noi|bat|dung|tang|giam|kiem tra|take|capture|record|read|play|start|stop|turn|check|speak)\\b")
+        if (Regex("(?<![\\p{L}\\p{N}])đừng(?![\\p{L}\\p{N}])").containsMatchIn(accented) || negatedAction.containsMatchIn(normalized)) {
             return AppIntent.Clarification("Không thực hiện lệnh. Hãy nói yêu cầu bạn muốn thực hiện.")
+        }
+        // STT without diacritics cannot distinguish “đừng” from “dừng”. Neither
+        // interpretation should execute a following capture/read/play action.
+        if (Regex("^dung (chup|phat|bat dau)\\b").containsMatchIn(normalized) || normalized.startsWith("dung doc ")) {
+            return AppIntent.Clarification("Chưa rõ bạn muốn dừng hay thực hiện lệnh. Hãy nói lại một yêu cầu.")
         }
         return when {
             normalized in setOf("ping", "kiem tra ket noi") -> AppIntent.Ping
@@ -62,13 +72,16 @@ object IntentRouter {
             normalized in setOf("xin chao", "chao", "hello", "hi") -> AppIntent.LocalQuery(AppIntent.LocalQuery.Kind.GREETING)
             normalized in setOf("tro giup", "huong dan", "help", "ban lam duoc gi") -> AppIntent.LocalQuery(AppIntent.LocalQuery.Kind.HELP)
             else -> {
-                val arithmetic = Regex("^(?:tinh |calculate )?(-?\\d{1,18}(?:[.,]\\d{1,12})?)\\s*(cong|tru|nhan|chia|plus|minus|times|divided by|[+*/×÷-])\\s*(-?\\d{1,18}(?:[.,]\\d{1,12})?)(?: bang bao nhieu)?$").matchEntire(normalized)
-                if (arithmetic != null) return AppIntent.Calculate(arithmetic.groupValues[1], arithmetic.groupValues[2], arithmetic.groupValues[3])
+                SpokenArithmetic.route(normalized)?.let { return it }
+                if (normalized in setOf("doc", "doc giup toi", "doc giup minh", "xem giup toi", "xem cai nay", "giup toi voi cai nay", "read", "look at this", "help me with this")) {
+                    return AppIntent.Clarification("Bạn muốn đọc chữ hay mô tả cảnh? Hãy nói đọc chữ hoặc mô tả cảnh.",
+                        AppIntent.Clarification.Topic.READ_OR_DESCRIBE)
+                }
                 if (Regex("^(chup|quay|bat dau quay|dung quay|take photo|start video)\\b").containsMatchIn(normalized)) {
                     return AppIntent.Clarification("Chưa rõ lệnh. Hãy nói chụp ảnh, quay video hoặc dừng quay.")
                 }
-                val needsPhoto = listOf("truoc mat", "nhin thay gi", "canh nay", "buc anh", "anh nay", "doc chu", "day la", "cai nay", "vat nay", "what is in front", "what do you see", "describe the scene", "this photo", "what is this", "read this")
-                    .any { normalized.contains(it) }
+                val needsPhoto = listOf("truoc mat", "nhin thay gi", "nhin giup", "mo ta canh", "mo ta can phong", "mo ta phong", "canh nay", "buc anh", "anh nay", "doc chu", "day la", "day co phai", "cai nay", "vat nay", "vat ben trai", "vat ben phai", "ben trai toi", "ben phai toi", "what is in front", "what do you see", "describe the scene", "describe the room", "look for me", "on my left", "on my right", "this photo", "what is this", "is this", "read this")
+                    .any { Regex("(?:^| )${Regex.escape(it)}(?: |$)").containsMatchIn(normalized) }
                 AppIntent.Question(text, needsPhoto)
             }
         }

@@ -5,9 +5,10 @@ import hmac
 import json
 import os
 import io
+import struct
 import wave
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.error import HTTPError, URLError
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
@@ -23,6 +24,11 @@ def upstream_error(code: int) -> tuple[int, dict]:
     """Distinguish server-key rejection from a bad app token; never forward upstream bodies."""
     kind = "AI_QUOTA" if code == 429 else "AI_AUTH_FAILED" if code in (401, 403) else "AI_HTTP_ERROR"
     return (429 if code == 429 else 502), {"error": kind, "status": code}
+
+
+def network_error(error: OSError) -> tuple[int, dict]:
+    timeout = isinstance(error, TimeoutError) or isinstance(getattr(error, "reason", None), TimeoutError)
+    return (504, {"error": "AI_TIMEOUT"}) if timeout else (502, {"error": "AI_UNAVAILABLE"})
 
 
 def make_payload(question: str, image_base64: str | None) -> dict:
@@ -62,6 +68,8 @@ def make_transcription_payload(audio_base64: str, language_tag: str) -> dict:
                 raise ValueError("Expected PCM16 mono 16 kHz WAV")
             if not 1 <= wav.getnframes() <= 16000 * 30:
                 raise ValueError("Audio must be 0..30 seconds")
+            if len(wav.readframes(wav.getnframes())) != wav.getnframes() * 2:
+                raise ValueError("Truncated WAV audio")
     except (wave.Error, EOFError) as error:
         raise ValueError("Invalid WAV audio") from error
     return {
@@ -82,12 +90,30 @@ def ask_gemini(payload: dict, api_key: str, model: str = MODEL) -> str:
     )
     with urlopen(request, timeout=35) as response:
         data = json.load(response)
-    candidates = data.get("candidates") or []
-    parts = candidates[0].get("content", {}).get("parts", []) if candidates else []
-    answer = "".join(part.get("text", "") for part in parts if isinstance(part, dict)).strip()
+    parts = response_parts(data)
+    answer = "".join(part["text"] for part in parts
+                     if not part.get("thought") and isinstance(part.get("text"), str)).strip()
     if not answer:
         raise RuntimeError("AI returned no text")
     return answer
+
+
+def response_parts(data: object) -> list[dict]:
+    """Validate the upstream shape before extracting text/audio, without leaking its body."""
+    if not isinstance(data, dict):
+        raise ValueError("Invalid AI response")
+    candidates = data.get("candidates", [])
+    if not isinstance(candidates, list):
+        raise ValueError("Invalid AI candidates")
+    if not candidates:
+        raise RuntimeError("AI returned no candidates")
+    first = candidates[0]
+    if not isinstance(first, dict) or not isinstance(first.get("content", {}), dict):
+        raise ValueError("Invalid AI content")
+    parts = first.get("content", {}).get("parts", [])
+    if not isinstance(parts, list) or any(not isinstance(part, dict) for part in parts):
+        raise ValueError("Invalid AI parts")
+    return parts
 
 
 def make_speech_payload(text: str, language_tag: str) -> dict:
@@ -114,8 +140,7 @@ def ask_gemini_audio(payload: dict, api_key: str, model: str = TTS_MODEL) -> tup
     )
     with urlopen(request, timeout=60) as response:
         data = json.load(response)
-    candidates = data.get("candidates") or []
-    parts = candidates[0].get("content", {}).get("parts", []) if candidates else []
+    parts = response_parts(data)
     for part in parts:
         if not isinstance(part, dict):
             continue
@@ -134,41 +159,59 @@ def ask_gemini_audio(payload: dict, api_key: str, model: str = TTS_MODEL) -> tup
 
 
 def to_pcm16k_mono(raw: bytes, mime: str) -> bytes:
-    """Normalize cloud TTS output to PCM_S16LE mono 16 kHz for the glasses speaker."""
-    try:
-        import audioop  # Legacy opt-in audio routes only; Python <= 3.12.
-    except ImportError as error:
-        raise ValueError("Legacy cloud audio needs Python <= 3.12; use local Android STT/TTS") from error
+    """Normalize legacy TTS without audioop (removed in Python 3.13).
+
+    Use the same bounded linear interpolation as the Android renderer. Raw Gemini
+    L16 is interpreted as little-endian mono, matching the existing API contract.
+    """
     if mime.startswith("audio/wav") or raw[:4] == b"RIFF":
-        with wave.open(io.BytesIO(raw), "rb") as wav:
-            if wav.getcomptype() != "NONE":
-                raise ValueError("Unsupported TTS audio")
-            channels, width, rate = wav.getnchannels(), wav.getsampwidth(), wav.getframerate()
-            if channels not in (1, 2) or width not in (1, 2) or not 4000 <= rate <= 96000:
-                raise ValueError("Unsupported TTS audio")
-            frames = wav.readframes(wav.getnframes())
-        if not frames:
-            raise RuntimeError("AI returned no audio")
-        if width == 1:  # unsigned 8-bit -> signed 16-bit
-            frames = audioop.lin2lin(audioop.bias(frames, 1, -128), 1, 2)
-        if channels == 2:
-            frames = audioop.tomono(frames, 2, 0.5, 0.5)
-        if rate != 16000:
-            frames, _ = audioop.ratecv(frames, 2, 1, rate, 16000, None)
-    else:  # raw L16 PCM, e.g. audio/L16;rate=24000
+        try:
+            with wave.open(io.BytesIO(raw), "rb") as wav:
+                channels, width, rate = wav.getnchannels(), wav.getsampwidth(), wav.getframerate()
+                count = wav.getnframes()
+                if wav.getcomptype() != "NONE" or channels not in (1, 2) or width not in (1, 2) or not 4000 <= rate <= 96000:
+                    raise ValueError("Unsupported TTS audio")
+                if count > rate * 30:
+                    raise ValueError("Answer audio is longer than 30 seconds")
+                frames = wav.readframes(count)
+                if len(frames) != count * channels * width:
+                    raise ValueError("Truncated WAV audio")
+        except (wave.Error, EOFError) as error:
+            raise ValueError("Invalid WAV audio") from error
+    else:
+        if mime.split(";", 1)[0].strip().lower() != "audio/l16":
+            raise ValueError("Unsupported TTS audio")
+        channels, width = 1, 2
         rate = 24000
-        for token in mime.split(";"):
+        for token in mime.split(";")[1:]:
             token = token.strip()
-            if token.startswith("rate=") and token[5:].isdigit():
+            if token.startswith("rate="):
+                if not token[5:].isdigit():
+                    raise ValueError("Invalid TTS sample rate")
                 rate = int(token[5:])
-        if not raw or len(raw) % 2 != 0 or not 4000 <= rate <= 96000:
+            elif token.startswith("channels=") and token != "channels=1":
+                raise ValueError("Unsupported TTS channels")
+        if len(raw) % 2 != 0 or not 4000 <= rate <= 96000:
             raise ValueError("Unsupported TTS audio")
         frames = raw
-        if rate != 16000:
-            frames, _ = audioop.ratecv(frames, 2, 1, rate, 16000, None)
-    if len(frames) > MAX_SPEAK_BYTES:
-        raise ValueError("Answer audio is longer than 30 seconds")
-    return frames
+        if len(frames) // 2 > rate * 30:
+            raise ValueError("Answer audio is longer than 30 seconds")
+    if not frames:
+        raise RuntimeError("AI returned no audio")
+    samples = [(value - 128) * 256 for value in frames] if width == 1 else [value[0] for value in struct.iter_unpack("<h", frames)]
+    if channels == 2:
+        samples = [int((samples[i] + samples[i + 1]) / 2) for i in range(0, len(samples), 2)]
+    if rate == 16000:
+        return b"".join(struct.pack("<h", value) for value in samples)
+    count = max(1, len(samples) * 16000 // rate)
+    output = bytearray(count * 2)
+    for index in range(count):
+        left, fraction = divmod(index * rate, 16000)
+        left = min(left, len(samples) - 1)
+        right = min(left + 1, len(samples) - 1)
+        value = round((samples[left] * (16000 - fraction) + samples[right] * fraction) / 16000)
+        struct.pack_into("<h", output, index * 2, value)
+    return bytes(output)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -205,6 +248,8 @@ class Handler(BaseHTTPRequestHandler):
             if not 1 <= size <= limit:
                 raise ValueError("Invalid request size")
             body = json.loads(self.rfile.read(size))
+            if not isinstance(body, dict):
+                raise ValueError("Request must be a JSON object")
             session_id = body.get("sessionId")
             if not isinstance(session_id, str) or not 1 <= len(session_id) <= 100:
                 raise ValueError("Invalid sessionId")
@@ -231,10 +276,12 @@ class Handler(BaseHTTPRequestHandler):
                 raw, mime = ask_gemini_audio(payload, os.environ["GEMINI_API_KEY"], TTS_MODEL)
                 pcm = to_pcm16k_mono(raw, mime)
         except HTTPError as error:
-            self.send_json(*upstream_error(error.code))
+            status = error.code
+            error.close()
+            self.send_json(*upstream_error(status))
             return
-        except (URLError, TimeoutError):
-            self.send_json(504, {"error": "AI_TIMEOUT"})
+        except OSError as error:
+            self.send_json(*network_error(error))
             return
         except RuntimeError:
             self.send_json(502, {"error": "AI_EMPTY_RESPONSE"})
@@ -253,13 +300,18 @@ class Handler(BaseHTTPRequestHandler):
             model = MODEL if self.path == "/v1/answer" else TRANSCRIBE_MODEL
             answer = ask_gemini(payload, os.environ["GEMINI_API_KEY"], model)
         except HTTPError as error:
-            self.send_json(*upstream_error(error.code))
+            status = error.code
+            error.close()
+            self.send_json(*upstream_error(status))
             return
-        except (URLError, TimeoutError):
-            self.send_json(504, {"error": "AI_TIMEOUT"})
+        except OSError as error:
+            self.send_json(*network_error(error))
             return
         except RuntimeError:
             self.send_json(502, {"error": "AI_EMPTY_RESPONSE"})
+            return
+        except ValueError:
+            self.send_json(502, {"error": "AI_BAD_RESPONSE"})
             return
         field = "answer" if self.path == "/v1/answer" else "transcript"
         self.send_json(200, {"sessionId": session_id, field: answer})

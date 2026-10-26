@@ -4,13 +4,23 @@ Bản local-first 28/09/2026: xem [hướng dẫn build, model và nghiệm thu]
 
 ## Đọc chữ offline và thử bốn chức năng
 
-Kết nối kính rồi chọn tiếng Việt và wake **Hi ESP**. OCR có nút **Chụp và đọc chữ** hoặc lệnh “Đọc chữ trước mặt tôi”, “Đọc nhãn”, “Đọc văn bản này”. **Đọc tiếp** dùng văn bản đã nhận dạng; **Xoay ảnh và đọc lại** dùng ảnh cũ, không chụp lại. **Phát lại** chỉ phát đoạn đã có, không gọi Gemini. Demo dùng ảnh nhân tạo, không chứng minh camera kính đọc sách tốt.
+Kết nối kính rồi chọn tiếng Việt, bấm **WAKE AI** để thu một câu từ mic kính. Bản hiện hành chưa nghe wake word ở IDLE. OCR có nút **Chụp và đọc chữ** hoặc lệnh “Đọc chữ trước mặt tôi”, “Đọc nhãn”, “Đọc văn bản này”. **Đọc tiếp** dùng văn bản đã nhận dạng; **Xoay ảnh và đọc lại** dùng ảnh cũ, không chụp lại. **Phát lại** chỉ phát đoạn đã có, không gọi Gemini. Demo dùng ảnh nhân tạo, không chứng minh camera kính đọc sách tốt.
 
-Mic kính gửi PCM về Android để STT offline. WakeNet Hi ESP chạy trên S3; không có model wake “Kính ơi”. Giờ/ngày/phép tính và OCR không cần URL/token backend. Phép tính hiện nhận toán hạng dạng chữ số trong transcript, ví dụ “Tính 2,5 cộng 3”; chưa hỗ trợ mọi cách đọc số bằng chữ. Gemini chỉ tạo nội dung câu hỏi ngoài nhóm local; lỗi cloud không chặn OCR/lệnh local.
+Mic kính gửi PCM về Android để STT offline. Tích hợp wake word và model lệnh trên chip đi theo [kế hoạch AI-VISION](ke-hoach-ai-vision.md); model Hi ESP cũ load được không xác nhận wake đang hoạt động. Giờ/ngày/phép tính và OCR không cần URL/token backend. Phép tính nhận chữ số (“Tính 2,5 cộng 3”) và ngữ pháp số bằng chữ Việt/Anh 0–999 (“hai cộng ba”, “two plus three”), số âm và thập phân đọc từng chữ số. Gemini chỉ tạo nội dung câu hỏi ngoài nhóm local; lỗi cloud không chặn OCR/lệnh local.
 
 Thử **Test loa bằng beep** trước, rồi **Test giọng Việt**, sau đó chụp/lưu ảnh và đọc chữ. Tắt Internet nhưng giữ Bluetooth/hotspot kính. Camera QVGA hiện phù hợp chữ lớn, gần và rõ; chữ nhỏ có thể thiếu hoặc sai. Chưa đo độ trễ/TTS/RAM trên điện thoại thật cho bản OCR mới.
 
 ## Android trên máy hiện tại
+
+Ưu tiên mới 26/10: hoàn thiện core/backend bằng kiểm thử trên máy tính. [Báo cáo phần mềm](hoan-thien-phan-mem-2026-10-26.md): 73 JVM unit test và 21 Python test đạt; compile/lint Android đạt. Source mới cần được đóng gói lại trước khi dùng các APK ở báo cáo lịch sử để nghiệm thu.
+
+Kiểm chứng ngày 19/10/2026: SDK tại `D:\Android\Sdk` (Platform 37.0, Build Tools 36.0.0), emulator `AiVision_Android_16` / `emulator-5554` chạy API 36 x86_64. Build APK/test và lint đạt; 67 unit + 34 instrumentation offline đạt, 1 ca cloud bỏ qua. [Báo cáo, hash APK và lệnh chạy lại](nghiem-thu-giai-doan-1-2026-10-19.md).
+
+Trong PowerShell tại `android/`, dùng `$env:ANDROID_HOME = 'D:\Android\Sdk'` trước các lệnh Gradle nếu chưa có `local.properties`. Đường dẫn SDK/JDK trong các bản bàn giao lịch sử bên dưới có thể khác máy hiện tại.
+
+Cập nhật 26/10/2026: đã build/đóng gói lại source với `--no-daemon`, chạy mới **67 unit test đạt**; instrumentation offline trên APK mới **36 đạt, 1 cloud bỏ qua**. Có một timeout PCM ở lượt đầu, chạy riêng và chạy lại toàn bộ đạt; xem [báo cáo, hash APK và điều kiện nghiệm thu điện thoại](kiem-tra-esp32-app-ai-2026-10-26.md#tiếp-tục-build-lại-source-và-hồi-quy-offline-ngày-2610). Configuration cache được tắt vì tác vụ chuẩn bị model chưa tương thích. Lệnh build khuyến nghị hiện tại: ` .\gradlew.bat :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest --offline --no-daemon --console=plain`.
+
+### Môi trường bàn giao cũ
 
 Đã kiểm tra ngày 24/09/2026:
 

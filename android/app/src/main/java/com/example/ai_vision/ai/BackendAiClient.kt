@@ -40,19 +40,26 @@ interface AiClient {
     suspend fun speak(config: AiBackendConfig, sessionId: String, text: String, languageTag: String): ByteArray
 }
 
+internal fun requireBackendSession(json: JSONObject, sessionId: String) {
+    if (json.opt("sessionId") != sessionId) throw IOException("AI response belongs to another session")
+}
+
+internal fun backendText(json: JSONObject, field: String): String =
+    (json.opt(field) as? String)?.trim()?.takeIf { it.isNotEmpty() }
+        ?: throw IOException("AI returned no valid $field text")
+
 /** Calls our backend; the Gemini API key remains on the server. */
 class BackendAiClient : AiClient {
     override suspend fun answer(config: AiBackendConfig, question: AiQuestion): String = withContext(Dispatchers.IO) {
-        require(question.text.isNotBlank()) { "Question is empty" }
+        require(question.text.isNotBlank() && question.text.length <= 4000) { "Question must contain 1..4000 characters" }
         val body = JSONObject().apply {
             put("sessionId", question.sessionId)
             put("question", question.text)
             question.jpeg?.let { put("imageBase64", Base64.encodeToString(it, Base64.NO_WRAP)) }
         }
         val json = post(config, "answer", body)
-        requireSession(json, question.sessionId)
-        json.optString("answer").takeIf { it.isNotBlank() }
-            ?: throw IOException("AI returned an empty answer")
+        requireBackendSession(json, question.sessionId)
+        backendText(json, "answer")
     }
 
     override suspend fun speak(config: AiBackendConfig, sessionId: String, text: String, languageTag: String): ByteArray = withContext(Dispatchers.IO) {
@@ -64,7 +71,7 @@ class BackendAiClient : AiClient {
             put("languageTag", languageTag)
         }
         val json = post(config, "speak", body)
-        requireSession(json, sessionId)
+        requireBackendSession(json, sessionId)
         if (json.optInt("sampleRate", -1) != 16000) throw IOException("Unexpected answer audio format")
         requireGlassesPcm(Base64.decode(json.optString("audioBase64"), Base64.DEFAULT))
     }
@@ -78,9 +85,8 @@ class BackendAiClient : AiClient {
             put("audioBase64", Base64.encodeToString(wav, Base64.NO_WRAP))
         }
         val json = post(config, "transcribe", body)
-        requireSession(json, sessionId)
-        json.optString("transcript").trim().takeIf { it.isNotBlank() }
-            ?: throw IOException("No speech recognized from glasses")
+        requireBackendSession(json, sessionId)
+        backendText(json, "transcript")
     }
 
     private suspend fun post(config: AiBackendConfig, path: String, body: JSONObject): JSONObject {
@@ -131,10 +137,6 @@ class BackendAiClient : AiClient {
             }
             JSONObject(response)
         }
-    }
-
-    private fun requireSession(json: JSONObject, sessionId: String) {
-        if (json.optString("sessionId") != sessionId) throw IOException("AI response belongs to another session")
     }
 
     private fun pcmToWav(pcm: ByteArray): ByteArray {

@@ -7,6 +7,9 @@ import com.example.ai_vision.ai.*
 import com.example.ai_vision.speech.*
 import com.example.ai_vision.ui.*
 import kotlinx.coroutines.*
+import kotlin.coroutines.Continuation
+import kotlin.coroutines.resume
+import kotlin.coroutines.suspendCoroutine
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -104,7 +107,44 @@ class ReplyPlaybackTest {
             runBlocking { withTimeout(5000) { started.await() } }
             main { assertTrue(controller.actionState is ActionState.Running); controller.cancelAction() }
             waitIdle(controller)
-            main { assertEquals(ActionState.Idle, controller.actionState) }
+            main { assertEquals(ActionState.Idle, controller.actionState); assertFalse(controller.canReplayAudio) }
+        } finally { main { controller.disconnect() }; scope.cancel() }
+    }
+
+    @Test fun lateSynthesisAfterCancelCannotPlayInTheNextSession() {
+        var rendered: Continuation<ByteArray>? = null
+        var blockSynthesis = true
+        val played = mutableListOf<Byte>()
+        val renderer = object : SpeechRenderer {
+            override suspend fun renderPcm16k(text: String, languageTag: String): ByteArray =
+                if (blockSynthesis) suspendCoroutine { rendered = it } else byteArrayOf(2, 0)
+            override fun stop() {}
+            override fun close() {}
+        }
+        val audio = object : PcmOutput {
+            override suspend fun play(pcm: ByteArray) { played += pcm[0] }
+            override fun stop() {}
+            override fun close() {}
+        }
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+        val controller = DeviceController(app, scope, renderer, audio)
+        try {
+            main {
+                controller.demoMode = true; controller.connect()
+                controller.inputText = "Xin chào"; controller.submitInput()
+                assertNotNull(rendered)
+                controller.cancelAction()
+                rendered!!.resume(byteArrayOf(1, 0))
+            }
+            waitIdle(controller)
+            main {
+                assertTrue(played.isEmpty())
+                assertFalse(controller.canReplayAudio)
+                blockSynthesis = false
+                controller.inputText = "Hai cộng ba"; controller.submitInput()
+            }
+            waitIdle(controller)
+            main { assertEquals("5", controller.answerText); assertEquals(listOf(2.toByte()), played) }
         } finally { main { controller.disconnect() }; scope.cancel() }
     }
 }
